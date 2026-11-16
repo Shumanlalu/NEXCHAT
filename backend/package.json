@@ -14,7 +14,7 @@
     "typecheck": "tsc --noEmit"
   },
   "engines": {
-    "node": ">=20"
+    "node": "24.x"
   },
   "dependencies": {
     "@fastify/cors": "9.0.1",

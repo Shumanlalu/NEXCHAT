@@ -358,6 +358,16 @@ class ChatRepository(
         runCatching { replenishPreKeysIfNeeded() }
     }
 
+    /**
+     * Fallback sync used while the socket is connected. Serverless relays can
+     * place a sender and recipient on different instances, so a realtime push
+     * is best-effort. This ensures queued ciphertext is still fetched.
+     */
+    suspend fun pollPending() = withContext(Dispatchers.IO) {
+        runCatching { receivePending() }
+        runCatching { flushOutbox() }
+    }
+
     private suspend fun receivePending() {
         val response = api.pendingEnvelopes()
         val ackIds = mutableListOf<String>()

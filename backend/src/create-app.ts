@@ -2,7 +2,7 @@ import websocket from "@fastify/websocket";
 import cors from "@fastify/cors";
 import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
-import Fastify, { type FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyServerOptions } from "fastify";
 import type { AppConfig } from "./config";
 import type { Database } from "./db";
 import { HttpError, getBearerToken, type DeviceRow, type UserRow } from "./http";
@@ -18,12 +18,8 @@ export interface AppDependencies {
   db: Database;
 }
 
-export async function buildApp(deps: AppDependencies): Promise<FastifyInstance> {
-  const { config, db } = deps;
-  const tokens = new TokenService(config);
-  const hub = new WsHub();
-
-  const app = Fastify({
+export function fastifyOptions(config: AppConfig): FastifyServerOptions {
+  return {
     logger: {
       level: config.logLevel,
       redact: {
@@ -44,7 +40,16 @@ export async function buildApp(deps: AppDependencies): Promise<FastifyInstance> 
     bodyLimit: Math.max(config.maxAttachmentBytes + 16_384, 1_048_576),
     requestIdHeader: "x-request-id",
     genReqId: () => crypto.randomUUID(),
-  });
+  };
+}
+
+export async function buildApp(
+  deps: AppDependencies,
+  app: FastifyInstance,
+): Promise<FastifyInstance> {
+  const { config, db } = deps;
+  const tokens = new TokenService(config);
+  const hub = new WsHub();
 
   await app.register(helmet, {
     contentSecurityPolicy: false,

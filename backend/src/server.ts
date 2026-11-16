@@ -1,12 +1,14 @@
+import Fastify from "fastify";
 import { loadConfig } from "./config";
 import { Database } from "./db";
-import { buildApp } from "./app";
+import { buildApp, fastifyOptions } from "./create-app";
 
 async function main(): Promise<void> {
   const config = loadConfig();
   const db = new Database(config.databaseUrl, { max: config.dbPoolMax, ssl: config.dbSsl });
   await db.migrate();
-  const app = await buildApp({ config, db });
+  const app = Fastify(fastifyOptions(config));
+  await buildApp({ config, db }, app);
 
   const shutdown = async (signal: string): Promise<void> => {
     app.log.info({ signal }, "shutting down");

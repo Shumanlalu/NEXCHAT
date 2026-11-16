@@ -3,6 +3,7 @@ android/local.properties
 android/keystore.properties
 android/release.keystore
 android/.gradle/
+android/.kotlin/
 android/build/
 android/app/build/
 android/.idea/
@@ -11,6 +12,8 @@ android/*.iml
 backend/node_modules/
 backend/dist/
 backend/.env
+.vercel/
+backend/.vercel/
 .env
 *.log
 *.apk

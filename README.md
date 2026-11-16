@@ -21,7 +21,7 @@ numbers, and per-device sessions.
 | Private groups | Implemented as pairwise encrypted fan-out to every member device |
 | Encrypted local storage | SQLCipher; key protected with Android Keystore AES-GCM |
 | Message states | Pending, sent, delivered, read, failed; queued in an encrypted outbox |
-| Reliability | Retry loop, prekey replenishment, duplicate-envelope detection |
+| Reliability | Retry loop, prekey replenishment, duplicate-envelope detection, 20-second queued-message polling fallback |
 | Identity verification | Per-device numeric safety numbers, contact-level verification marker |
 | Attachments | Not implemented in this build |
 | Voice/video calls | Not implemented in this build |
@@ -112,6 +112,27 @@ npm start
 Use `npm run dev` for TypeScript watch mode and `npm run typecheck` for a static
 check.
 
+### Managed deployment (Vercel + Neon)
+
+A live backend is deployed at:
+
+```
+https://nexchat-three.vercel.app
+```
+
+It runs the Fastify server as a Vercel Node.js Function and stores data in a Neon
+PostgreSQL database provisioned through the Vercel Marketplace. The Vercel
+project is `shuman2/nexchat`; the database and all secrets are production-only
+environment variables and are not in this repository. For a self-hosted
+alternative that keeps a persistent process, use the Docker stack above.
+
+Vercel Functions have a maximum WebSocket lifetime (300 seconds on the Hobby
+plan). The Android client reconnects with exponential backoff and polls the
+encrypted-envelope queue every 20 seconds, so messages still arrive if a socket
+expires or a push reaches a different function instance. For guaranteed
+low-latency realtime fan-out at scale, deploy the Docker server on a host that
+keeps one process running, or add a shared pub/sub layer.
+
 ## Build the Android app
 
 Requirements: JDK 17, Android SDK platform 35, and an internet connection for
@@ -182,9 +203,14 @@ only to the HTTPS server baked into that build.
 - No Android emulator or physical device is available in this workspace, so the
   APK has not been runtime-tested. Build success is not the same as device
   verification.
-- Online messaging requires the app process or foreground service to maintain a
-  WebSocket. There is no push-notification service; aggressive battery
-  optimizations can delay messages.
+- Online messaging needs either the WebSocket or the 20-second queue poll, so
+  the app process or foreground service must be running. There is no
+  push-notification service; aggressive battery optimizations can delay
+  messages until the app is opened again.
+- On the Vercel deployment, realtime presence and delivery-receipt pushes are
+  best-effort because a socket may be held by a different function instance from
+  the HTTP request. Queued ciphertext is still fetched by polling; treat the
+  delivered tick as eventually consistent on that host.
 - Calls, Bluetooth LE nearby delivery, attachments, and QR device linking are
   intentionally absent and reported as unavailable in the UI.
 - Safety-number verification is currently stored per contact rather than

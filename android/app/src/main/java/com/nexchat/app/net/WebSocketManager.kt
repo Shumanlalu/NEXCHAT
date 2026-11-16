@@ -53,9 +53,18 @@ class WebSocketManager(
     @Volatile
     private var socket: WebSocket? = null
     private var loop: Job? = null
+    private var poller: Job? = null
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
+        // The relay may serve sockets from more than one instance. Poll as a
+        // delivery fallback so a missed push never strands ciphertext.
+        poller = scope.launch {
+            while (isActive && running.get()) {
+                runCatching { chat.pollPending() }
+                delay(20_000L)
+            }
+        }
         loop = scope.launch {
             var backoff = 1_000L
             while (isActive && running.get()) {
@@ -82,6 +91,8 @@ class WebSocketManager(
         socket = null
         loop?.cancel()
         loop = null
+        poller?.cancel()
+        poller = null
         _state.value = ConnectionState.STOPPED
     }
 
