@@ -1,0 +1,11 @@
+# Replace api.example.com and set up DNS before starting Caddy.
+api.example.com {
+    encode zstd gzip
+    header {
+        Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+        -Server
+    }
+    reverse_proxy server:8080
+}

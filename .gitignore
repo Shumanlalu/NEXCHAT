@@ -1,0 +1,19 @@
+# Generated build outputs, local SDK paths, and signing secrets
+android/local.properties
+android/keystore.properties
+android/release.keystore
+android/.gradle/
+android/build/
+android/app/build/
+android/.idea/
+android/*.iml
+.tools/
+backend/node_modules/
+backend/dist/
+backend/.env
+.env
+*.log
+*.apk
+*.aab
+dist/
+.DS_Store

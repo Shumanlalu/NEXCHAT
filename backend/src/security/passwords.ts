@@ -1,0 +1,72 @@
+import { randomBytes, scrypt as scryptCallback, timingSafeEqual } from "node:crypto";
+
+const KEY_LENGTH = 64;
+const SCRYPT_COST = 32768;
+const SCRYPT_BLOCK_SIZE = 8;
+const SCRYPT_PARALLELIZATION = 2;
+
+/**
+ * Password hashing uses Node's maintained OpenSSL scrypt implementation.
+ * Parameters target roughly 150-300 ms on modest server hardware. The salt and
+ * parameters are stored alongside the hash; changing parameters can be handled
+ * by a future password rehash on successful login.
+ */
+interface ScryptOptions {
+  N: number;
+  r: number;
+  p: number;
+  maxmem: number;
+}
+
+function deriveKey(password: string, salt: Buffer, options: ScryptOptions): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    scryptCallback(password, salt, KEY_LENGTH, options, (error, derived) => {
+      if (error) reject(error);
+      else resolve(derived as Buffer);
+    });
+  });
+}
+
+export async function hashPassword(password: string): Promise<{ hash: string; salt: string }> {
+  const salt = randomBytes(16);
+  const derived = await deriveKey(password.normalize("NFKC"), salt, {
+    N: SCRYPT_COST,
+    r: SCRYPT_BLOCK_SIZE,
+    p: SCRYPT_PARALLELIZATION,
+    maxmem: 64 * 1024 * 1024,
+  });
+  return {
+    hash: derived.toString("base64"),
+    salt: Buffer.concat([salt, Buffer.from([1])]).toString("base64"),
+  };
+}
+
+export async function verifyPassword(
+  password: string,
+  storedHash: string,
+  storedSalt: string,
+): Promise<boolean> {
+  try {
+    const saltBlob = Buffer.from(storedSalt, "base64");
+    if (saltBlob.length < 2) return false;
+    const salt = saltBlob.subarray(0, saltBlob.length - 1);
+    const expected = Buffer.from(storedHash, "base64");
+    if (expected.length !== KEY_LENGTH) return false;
+    const derived = await deriveKey(password.normalize("NFKC"), salt, {
+      N: SCRYPT_COST,
+      r: SCRYPT_BLOCK_SIZE,
+      p: SCRYPT_PARALLELIZATION,
+      maxmem: 64 * 1024 * 1024,
+    });
+    return timingSafeEqual(expected, derived);
+  } catch {
+    return false;
+  }
+}
+
+export function validatePassword(password: string): string | null {
+  if (password.length < 10) return "Password must contain at least 10 characters";
+  if (password.length > 128) return "Password must be at most 128 characters";
+  if (/^\s+$/.test(password)) return "Password cannot be only whitespace";
+  return null;
+}
