@@ -48,7 +48,16 @@ export class Database {
   async migrate(): Promise<void> {
     const schemaPath = path.join(__dirname, "schema.sql");
     const schema = fs.readFileSync(schemaPath, "utf8");
-    await this.pool.query(schema);
+    // Serverless cold starts can overlap. Serialize schema creation so two
+    // instances cannot race on indexes or constraint changes.
+    const client = await this.pool.connect();
+    try {
+      await client.query("SELECT pg_advisory_lock(741852963)");
+      await client.query(schema);
+    } finally {
+      await client.query("SELECT pg_advisory_unlock(741852963)").catch(() => undefined);
+      client.release();
+    }
   }
 
   async close(): Promise<void> {
