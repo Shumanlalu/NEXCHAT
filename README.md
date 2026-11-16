@@ -230,8 +230,14 @@ only to the HTTPS server baked into that build.
 - Server deployment must provide TLS. The included Caddyfile and Docker stack
   are examples, not a turnkey production deployment.
 
-## Third-party licenses
+## License
 
-libsignal is licensed under AGPL-3.0. See the libsignal project and its notices
-before distributing a modified build. Other dependencies retain their respective
-licenses. No project-wide license has been selected in this workspace.
+NEXCHAT is licensed under the GNU Affero General Public License, version 3
+(`AGPL-3.0-only`). The full text is in [`LICENSE`](LICENSE). Because the app
+includes libsignal, which is also AGPL-3.0, anyone who distributes a modified
+APK or operates a modified public server must make the corresponding source
+available under the same license.
+
+Other dependencies retain their respective licenses. See
+[`third_party/libsignal-notice.md`](third_party/libsignal-notice.md) for the
+libsignal notice.
