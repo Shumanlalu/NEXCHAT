@@ -53,7 +53,7 @@ class ApiClient(
     fun serverUrl(): String {
         val raw = settings.state.value.serverUrl.trim().trimEnd('/')
         if (raw.isBlank()) {
-            throw ApiException(0, "NO_SERVER", "Choose a NEXCHAT server before continuing")
+            throw ApiException(0, "NO_SERVER", "This build has no server configured")
         }
         val validScheme = raw.startsWith("https://") ||
             (BuildConfig.ALLOW_CLEARTEXT && (raw.startsWith("http://10.0.2.2") || raw.startsWith("http://localhost") || raw.startsWith("http://127.0.0.1")))

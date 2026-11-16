@@ -133,7 +133,16 @@ android/app/build/outputs/apk/debug/app-debug.apk
 The debug application ID is `com.nexchat.app.debug` and defaults to the emulator
 host address `http://10.0.2.2:8080`.
 
-For a signed release build, create `android/keystore.properties` with the
+Release builds have the server address compiled in; there is no server field in
+the app. Add your public HTTPS address to `android/local.properties` (which is
+ignored by git):
+
+```properties
+NEXCHAT_SERVER_URL=https://chat.example.com
+```
+
+Alternatively, set the `NEXCHAT_SERVER_URL` environment variable when building.
+For a signed release build, also create `android/keystore.properties` with the
 `storeFile`, `storePassword`, `keyAlias`, and `keyPassword` properties and place
 the referenced keystore under `android/`. Keep both files private; they are
 ignored by version control. Then run:
@@ -142,20 +151,20 @@ ignored by version control. Then run:
 .\gradlew.bat assembleRelease
 ```
 
-The release APK is written to `android/app/build/outputs/apk/release/`. The
-release build has no default server address, so enter your HTTPS server URL on
-the sign-in screen.
+The release APK is written to `android/app/build/outputs/apk/release/` and talks
+only to the HTTPS server baked into that build.
 
 ## First use
 
 1. Start the backend and confirm `/healthz` responds.
-2. Install the APK, open NEXCHAT, choose **Create your NEX ID**, and enter a
-   server URL if it is not already configured.
-3. Share your NEX ID or username with a contact. Search for someone under
+2. Install the APK and open NEXCHAT. The app connects to the server address that
+   was compiled into the APK.
+3. Choose **Create your NEX ID**.
+4. Share your NEX ID or username with a contact. Search for someone under
    **Contacts → Find people**, then start a chat.
-4. Compare the safety numbers shown on the contact screen in person or over a
+5. Compare the safety numbers shown on the contact screen in person or over a
    trusted channel before relying on the identity.
-5. To test messaging between two installations, use two devices or two
+6. To test messaging between two installations, use two devices or two
    emulator instances with separate accounts and devices.
 
 ## API overview
@@ -190,6 +199,8 @@ the sign-in screen.
   more ciphertext for large groups and is capped by the server at 100 members.
 - There is no automatic message backup. Signing out or uninstalling destroys
   local message history and keys.
+- The server address is compiled into each APK. Pointing the app at a different
+  server requires a new build and installation.
 - Server deployment must provide TLS. The included Caddyfile and Docker stack
   are examples, not a turnkey production deployment.
 

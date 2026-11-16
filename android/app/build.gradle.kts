@@ -16,6 +16,33 @@ val keystoreProps = Properties().apply {
     }
 }
 
+val localProps = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.exists()) {
+        FileInputStream(file).use { load(it) }
+    }
+}
+
+// Release builds bake in the operator's HTTPS server. Keep this out of the
+// repository by setting NEXCHAT_SERVER_URL in android/local.properties or the
+// environment when building.
+val configuredServerUrl = (
+    localProps.getProperty("NEXCHAT_SERVER_URL")
+        ?: System.getenv("NEXCHAT_SERVER_URL")
+        ?: ""
+).trim().trimEnd('/')
+
+if (configuredServerUrl.isNotBlank() && !configuredServerUrl.startsWith("https://")) {
+    throw GradleException("NEXCHAT_SERVER_URL must start with https://")
+}
+
+if (configuredServerUrl.isBlank()) {
+    logger.warn("NEXCHAT_SERVER_URL is not set; the release APK will not connect to a server.")
+}
+
+val configuredServerUrlLiteral =
+    "\"" + configuredServerUrl.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
 android {
     namespace = "com.nexchat.app"
     compileSdk = 35
@@ -63,7 +90,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            buildConfigField("String", "DEFAULT_API_BASE_URL", "\"\"")
+            buildConfigField("String", "DEFAULT_API_BASE_URL", configuredServerUrlLiteral)
             buildConfigField("boolean", "ALLOW_CLEARTEXT", "false")
             if (keystoreProps.isNotEmpty()) {
                 signingConfig = signingConfigs.getByName("release")

@@ -100,9 +100,7 @@ class AuthRepository(
         username: String,
         password: String,
         displayName: String,
-        serverUrl: String,
     ) = withContext(Dispatchers.IO) {
-        settings.setServerUrl(serverUrl)
         if (profileDao.get() != null) wipeLocalAccountData()
         val local = crypto.deviceIdentity()
         val batch = crypto.newUploadBatch()
@@ -135,9 +133,7 @@ class AuthRepository(
     suspend fun login(
         username: String,
         password: String,
-        serverUrl: String,
     ) = withContext(Dispatchers.IO) {
-        settings.setServerUrl(serverUrl)
         resetIfDifferentAccount(username)
         val local = crypto.deviceIdentity()
         val batch = crypto.newUploadBatch()

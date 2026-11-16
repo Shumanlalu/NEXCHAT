@@ -3,7 +3,6 @@ package com.nexchat.app.ui.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.nexchat.app.core.network.ApiException
-import com.nexchat.app.core.settings.SettingsStore
 import com.nexchat.app.data.AuthRepository
 import java.io.IOException
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -19,8 +18,6 @@ data class AuthFormState(
     val displayName: String = "",
     val password: String = "",
     val confirmPassword: String = "",
-    val serverUrl: String = "",
-    val showServer: Boolean = false,
     val showPassword: Boolean = false,
     val loading: Boolean = false,
     val error: String? = null,
@@ -28,14 +25,8 @@ data class AuthFormState(
 
 class AuthViewModel(
     private val auth: AuthRepository,
-    settings: SettingsStore,
 ) : ViewModel() {
-    private val _state = MutableStateFlow(
-        AuthFormState(
-            serverUrl = settings.state.value.serverUrl,
-            showServer = settings.state.value.serverUrl.isBlank(),
-        ),
-    )
+    private val _state = MutableStateFlow(AuthFormState())
     val state: StateFlow<AuthFormState> = _state.asStateFlow()
 
     fun setMode(mode: AuthMode) = update { it.copy(mode = mode, error = null) }
@@ -49,10 +40,6 @@ class AuthViewModel(
     fun setPassword(value: String) = update { it.copy(password = value, error = null) }
 
     fun setConfirmPassword(value: String) = update { it.copy(confirmPassword = value, error = null) }
-
-    fun setServerUrl(value: String) = update { it.copy(serverUrl = value.trim(), error = null) }
-
-    fun toggleServer() = update { it.copy(showServer = !it.showServer) }
 
     fun togglePassword() = update { it.copy(showPassword = !it.showPassword) }
 
@@ -72,13 +59,11 @@ class AuthViewModel(
                         username = snapshot.username,
                         password = snapshot.password,
                         displayName = snapshot.displayName,
-                        serverUrl = snapshot.serverUrl,
                     )
                 } else {
                     auth.login(
                         username = snapshot.username,
                         password = snapshot.password,
-                        serverUrl = snapshot.serverUrl,
                     )
                 }
             }
@@ -93,7 +78,6 @@ class AuthViewModel(
         if (state.username.length !in 3..24) {
             return "Username must be 3 to 24 letters, digits, or underscores."
         }
-        if (state.serverUrl.isBlank()) return "Enter the address of your NEXCHAT server."
         if (state.mode == AuthMode.REGISTER && state.displayName.isBlank()) {
             return "Choose the display name your contacts will see."
         }
@@ -111,12 +95,12 @@ class AuthViewModel(
             "DEVICE_ALREADY_REGISTERED" ->
                 "This device is linked to another account. Sign in to that account first."
             "RATE_LIMITED", "RATE_LIMIT_EXCEEDED" -> "Too many attempts. Wait a moment and try again."
-            "NO_SERVER" -> "Enter the address of your NEXCHAT server."
-            "INSECURE_SERVER" -> "The server address must use HTTPS."
+            "NO_SERVER" -> "This build has no server configured. Install a properly configured build."
+            "INSECURE_SERVER" -> "The configured server address must use HTTPS."
             "SESSION_EXPIRED" -> "Your session expired. Sign in again."
             else -> error.message ?: "The server rejected the request."
         }
-        is IOException -> "Could not reach the server. Check the address and your connection."
+        is IOException -> "Could not reach the server. Check your connection or contact the server operator."
         else -> error.message ?: "Something went wrong. Try again."
     }
 

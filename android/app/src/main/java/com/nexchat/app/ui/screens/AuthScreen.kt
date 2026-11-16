@@ -3,7 +3,6 @@ package com.nexchat.app.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -54,7 +53,7 @@ fun AuthScreen(
     onBack: (() -> Unit)? = null,
 ) {
     val palette = LocalNexPalette.current
-    val vm = nexViewModel { AuthViewModel(it.auth, it.settings) }
+    val vm = nexViewModel { AuthViewModel(it.auth) }
     val state by vm.state.collectAsStateWithLifecycle()
 
     LaunchedEffect(initialMode) { vm.setMode(initialMode) }
@@ -151,35 +150,6 @@ fun AuthScreen(
                     placeholder = "Repeat your password",
                     label = "Confirm password",
                     password = !state.showPassword,
-                )
-            }
-
-            Spacer(Modifier.height(10.dp))
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
-            ) {
-                TextButton(onClick = vm::toggleServer) {
-                    Text(
-                        if (state.showServer) "Hide server settings" else "Server settings",
-                        color = palette.textMuted,
-                        style = MaterialTheme.typography.labelMedium,
-                    )
-                }
-            }
-            if (state.showServer) {
-                GlassTextField(
-                    value = state.serverUrl,
-                    onValueChange = vm::setServerUrl,
-                    placeholder = "https://chat.example.com",
-                    label = "Server URL (HTTPS)",
-                )
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "Use a server you trust. The operator can see metadata such as IP addresses and delivery times, but not message contents.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = palette.textMuted,
-                    modifier = Modifier.padding(horizontal = 4.dp),
                 )
             }
 

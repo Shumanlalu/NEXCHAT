@@ -30,7 +30,9 @@ class SettingsStore(context: Context, defaultServerUrl: String) {
     val state: StateFlow<AppPreferences> = _state.asStateFlow()
 
     private fun load(defaultUrl: String): AppPreferences = AppPreferences(
-        serverUrl = prefs.getString(KEY_SERVER, defaultUrl).orEmpty(),
+        // The server is fixed at build time. A previously saved address is
+        // intentionally ignored so an APK always talks to its own backend.
+        serverUrl = defaultUrl.trim().trimEnd('/'),
         themeMode = runCatching {
             ThemeMode.valueOf(prefs.getString(KEY_THEME, ThemeMode.DARK.name)!!)
         }.getOrDefault(ThemeMode.DARK),
@@ -48,7 +50,6 @@ class SettingsStore(context: Context, defaultServerUrl: String) {
     fun update(transform: (AppPreferences) -> AppPreferences) {
         val updated = transform(_state.value)
         prefs.edit()
-            .putString(KEY_SERVER, updated.serverUrl)
             .putString(KEY_THEME, updated.themeMode.name)
             .putBoolean(KEY_READ_RECEIPTS, updated.readReceipts)
             .putBoolean(KEY_TYPING, updated.typingIndicators)
@@ -63,10 +64,7 @@ class SettingsStore(context: Context, defaultServerUrl: String) {
         _state.value = updated
     }
 
-    fun setServerUrl(url: String) = update { it.copy(serverUrl = url.trim().trimEnd('/')) }
-
     private companion object {
-        const val KEY_SERVER = "server_url"
         const val KEY_THEME = "theme_mode"
         const val KEY_READ_RECEIPTS = "read_receipts"
         const val KEY_TYPING = "typing_indicators"
