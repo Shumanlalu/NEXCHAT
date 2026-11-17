@@ -289,6 +289,12 @@ interface OutboxDao {
     @Query("DELETE FROM outbox WHERE clientId = :clientId")
     suspend fun deleteForClient(clientId: String)
 
+    @Query("SELECT DISTINCT clientId FROM outbox WHERE recipientNexId = :nexId")
+    suspend fun clientIdsForRecipient(nexId: String): List<String>
+
+    @Query("DELETE FROM outbox WHERE recipientNexId = :nexId")
+    suspend fun deleteForRecipient(nexId: String)
+
     @Query("DELETE FROM outbox WHERE clientId = :clientId AND recipientSignalDeviceId = :signalDeviceId")
     suspend fun deleteForClientAndDevice(clientId: String, signalDeviceId: Int)
 

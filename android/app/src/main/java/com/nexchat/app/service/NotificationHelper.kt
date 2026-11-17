@@ -100,8 +100,6 @@ class NotificationHelper(private val context: Context) {
     companion object {
         const val CHANNEL_MESSAGES = "nexchat_messages_v1"
         const val CHANNEL_SERVICE = "nexchat_service_v1"
-        const val CHANNEL_CALLS = "nexchat_calls_v1"
-        const val CHANNEL_NEARBY = "nexchat_nearby_v1"
         const val EXTRA_CONVERSATION_ID = "conversation_id"
         const val SERVICE_NOTIFICATION_ID = 4801
     }

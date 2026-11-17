@@ -1,0 +1,11 @@
+# Only the backend is deployed. Keep Android builds, SDKs, and the local
+# repository out of the upload so Vercel's 100 MB per-file limit is not hit.
+.git/
+.tools/
+android/
+dist/
+third_party/
+backend/node_modules/
+backend/dist/
+backend/.vercel/
+backend/.env*

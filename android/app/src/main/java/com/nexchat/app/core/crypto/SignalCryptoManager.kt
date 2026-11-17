@@ -12,6 +12,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.signal.libsignal.protocol.DuplicateMessageException
 import org.signal.libsignal.protocol.IdentityKey
+import org.signal.libsignal.protocol.ReusedBaseKeyException
 import org.signal.libsignal.protocol.SessionBuilder
 import org.signal.libsignal.protocol.SessionCipher
 import org.signal.libsignal.protocol.SignalProtocolAddress
@@ -85,11 +86,13 @@ class SignalCryptoManager(
             val address = SignalProtocolAddress(peerNexId, signalDeviceId)
             if (!store.containsSession(address)) {
                 val required = bundle ?: throw CryptoException("No prekey bundle available for $peerNexId")
+                val oneTimeKeyId = required.oneTimePreKeyId ?: PreKeyBundle.NULL_PRE_KEY_ID
+                val oneTimeKey = required.oneTimePreKeyPublic?.let { ECPublicKey(decode(it)) }
                 val preKeyBundle = PreKeyBundle(
                     required.registrationId,
                     required.signalDeviceId,
-                    required.oneTimePreKeyId,
-                    ECPublicKey(decode(required.oneTimePreKeyPublic)),
+                    oneTimeKeyId,
+                    oneTimeKey,
                     required.signedPreKeyId,
                     ECPublicKey(decode(required.signedPreKeyPublic)),
                     decode(required.signedPreKeySignature),
@@ -127,6 +130,8 @@ class SignalCryptoManager(
                     else -> throw CryptoException("Unsupported ciphertext type ${envelope.cipherType}")
                 }
             } catch (error: DuplicateMessageException) {
+                throw DuplicateEnvelopeException()
+            } catch (error: ReusedBaseKeyException) {
                 throw DuplicateEnvelopeException()
             } catch (error: UntrustedIdentityException) {
                 throw IdentityChangedException(envelope.senderNexId)

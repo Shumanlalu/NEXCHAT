@@ -296,6 +296,8 @@ fun SettingsScreen(
                     AboutLine("Local storage", "SQLCipher · Android Keystore")
                     Spacer(Modifier.height(8.dp))
                     AboutLine("Calls & nearby", "Not included in this build")
+                    Spacer(Modifier.height(8.dp))
+                    AboutLine("Attachments & transcription", "Not included in this build")
                 }
             }
             item {

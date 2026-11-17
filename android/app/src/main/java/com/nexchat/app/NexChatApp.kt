@@ -50,7 +50,7 @@ class AppContainer(val app: Application) {
     val auth: AuthRepository by lazy { AuthRepository(db, api, secure, crypto, settings, scope) }
     val chat: ChatRepository by lazy { ChatRepository(db, api, crypto, settings) }
     val contacts: ContactRepository by lazy { ContactRepository(db, api, crypto) }
-    val websocket: WebSocketManager by lazy { WebSocketManager(api, chat, auth, scope) }
+    val websocket: WebSocketManager by lazy { WebSocketManager(api, chat, auth, scope, app) }
 
     private val _startupError = MutableStateFlow<String?>(null)
     val startupError: StateFlow<String?> = _startupError.asStateFlow()
@@ -136,26 +136,6 @@ class AppContainer(val app: Application) {
                 NotificationManager.IMPORTANCE_LOW,
             ).apply {
                 description = "Keeps the encrypted message connection open"
-                setShowBadge(false)
-            },
-        )
-        manager.createNotificationChannel(
-            NotificationChannel(
-                NotificationHelper.CHANNEL_CALLS,
-                app.getString(R.string.notification_channel_calls),
-                NotificationManager.IMPORTANCE_HIGH,
-            ).apply {
-                description = "Encrypted audio calls"
-                setShowBadge(true)
-            },
-        )
-        manager.createNotificationChannel(
-            NotificationChannel(
-                NotificationHelper.CHANNEL_NEARBY,
-                app.getString(R.string.notification_channel_nearby),
-                NotificationManager.IMPORTANCE_LOW,
-            ).apply {
-                description = "Nearby Bluetooth discovery and relay status"
                 setShowBadge(false)
             },
         )

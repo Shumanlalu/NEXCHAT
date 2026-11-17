@@ -9,8 +9,7 @@
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.js",
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.js",
-    "test": "vitest run",
-    "test:watch": "vitest",
+    "test": "tsx --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "engines": {

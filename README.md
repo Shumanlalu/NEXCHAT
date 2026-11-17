@@ -21,11 +21,12 @@ numbers, and per-device sessions.
 | Private groups | Implemented as pairwise encrypted fan-out to every member device |
 | Encrypted local storage | SQLCipher; key protected with Android Keystore AES-GCM |
 | Message states | Pending, sent, delivered, read, failed; queued in an encrypted outbox |
-| Reliability | Retry loop, prekey replenishment, duplicate-envelope detection, 20-second queued-message polling fallback |
-| Identity verification | Per-device numeric safety numbers, contact-level verification marker |
-| Attachments | Not implemented in this build |
+| Reliability | Retry loop, reusable last-resort Kyber prekeys, optional one-time prekeys, device-list refresh, duplicate-envelope detection, 20-second queued-message polling fallback |
+| Identity verification | Per-device numeric safety numbers, contact-level verification marker, proactive identity-change detection, manual session reset from the contact screen |
+| Attachments | Not implemented in this build; avatar uploads are re-encoded to strip EXIF/GPS metadata |
 | Voice/video calls | Not implemented in this build |
 | Bluetooth LE nearby messaging | Not implemented in this build |
+| Offline voice-note transcription | Not implemented; there is no audio recording or attachment pipeline |
 | QR device linking | Not implemented; sign in separately on each device |
 | Push notifications | Not implemented; a foreground WebSocket service keeps the connection alive |
 
@@ -110,7 +111,8 @@ npm start
 ```
 
 Use `npm run dev` for TypeScript watch mode and `npm run typecheck` for a static
-check.
+check. `npm test` runs the prekey-distribution integration tests against an
+in-memory PostgreSQL database (`pg-mem`); it does not touch production data.
 
 ### Managed deployment (Vercel + Neon)
 
@@ -211,16 +213,18 @@ only to the HTTPS server baked into that build.
   best-effort because a socket may be held by a different function instance from
   the HTTP request. Queued ciphertext is still fetched by polling; treat the
   delivered tick as eventually consistent on that host.
-- Calls, Bluetooth LE nearby delivery, attachments, and QR device linking are
-  intentionally absent and reported as unavailable in the UI.
+- Calls, Bluetooth LE nearby delivery, attachments, offline voice-note
+  transcription, and QR device linking are intentionally absent and reported as
+  unavailable in the UI. There is no WebGL/3D renderer; the silver interface is
+  drawn natively with Jetpack Compose.
 - Safety-number verification is currently stored per contact rather than
   independently per peer device. The screen lists the fingerprint for each known
   device; a changed identity clears the contact's verified marker.
 - If a contact reinstalls the app (or otherwise changes their Signal identity),
-  the old pairwise session is rejected and this build has no in-chat "accept new
-  identity" action. Signing out and back in on both devices, which wipes local
-  history and creates fresh identities, restores messaging. Treat an unexpected
-  safety-number change as a security warning rather than an automatic refresh.
+  the client now detects the changed public identity key before sending. Use
+  **Reset security session** on the contact screen after verifying the new safety
+  number. Signing out and back in on both devices, which wipes local history and
+  creates fresh identities, also restores messaging.
 - Group delivery is pairwise fan-out, not sender-key group encryption. It costs
   more ciphertext for large groups and is capped by the server at 100 members.
 - There is no automatic message backup. Signing out or uninstalling destroys

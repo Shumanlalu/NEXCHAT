@@ -59,6 +59,17 @@ class ContactDetailViewModel(
             .onFailure { _messages.tryEmit(it.message ?: "Could not update the contact") }
     }
 
+    fun resetSecuritySession() = viewModelScope.launch {
+        runCatching {
+            chat.resetSecuritySession(nexId)
+            refreshNumbers()
+        }.onSuccess {
+            _messages.tryEmit("Security session reset. Send a new message to establish fresh keys.")
+        }.onFailure {
+            _messages.tryEmit(it.message ?: "Could not reset the security session")
+        }
+    }
+
     fun report(reason: String) = viewModelScope.launch {
         runCatching { contacts.report(nexId, reason) }
             .onSuccess { _messages.tryEmit("Report submitted") }

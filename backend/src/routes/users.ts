@@ -147,8 +147,14 @@ export async function registerUserRoutes(app: FastifyInstance, deps: Deps): Prom
       "SELECT COUNT(*) AS count FROM one_time_prekeys WHERE device_id = $1 AND used_at IS NULL",
       [auth.device.id],
     );
+    // Kyber prekeys are distributed as a reusable last-resort key so a fresh
+    // sender can always complete PQXDH even while the recipient is offline.
+    // Count the currently published key rather than filtering on used_at.
     const kyber = await db.one<{ count: string | number }>(
-      "SELECT COUNT(*) AS count FROM kyber_prekeys WHERE device_id = $1 AND used_at IS NULL",
+      `SELECT COUNT(*) AS count
+       FROM kyber_prekeys k
+       JOIN devices d ON d.id = k.device_id AND d.kyber_pre_key_id = k.key_id
+       WHERE k.device_id = $1`,
       [auth.device.id],
     );
     return reply.send({
@@ -192,11 +198,21 @@ export async function registerUserRoutes(app: FastifyInstance, deps: Deps): Prom
         body.kyberPreKeyPublic != null &&
         body.kyberPreKeySignature != null
       ) {
+        // The device row points at exactly one current last-resort Kyber key.
+        // Remove superseded rows so a bundle can never be built from an old key.
+        await client.query(
+          "DELETE FROM kyber_prekeys WHERE device_id = $1 AND key_id <> $2",
+          [auth.device.id, body.kyberPreKeyId],
+        );
         await client.query(
           `INSERT INTO kyber_prekeys (device_id, key_id, public_key, signature)
-           VALUES ($1,$2,$3,$4) ON CONFLICT (device_id, key_id) DO NOTHING`,
+           VALUES ($1,$2,$3,$4)
+           ON CONFLICT (device_id, key_id) DO UPDATE
+             SET public_key = EXCLUDED.public_key, signature = EXCLUDED.signature, used_at = NULL`,
           [auth.device.id, body.kyberPreKeyId, body.kyberPreKeyPublic, body.kyberPreKeySignature],
         );
+      } else {
+        await client.query("DELETE FROM kyber_prekeys WHERE device_id = $1", [auth.device.id]);
       }
     });
 
@@ -204,12 +220,26 @@ export async function registerUserRoutes(app: FastifyInstance, deps: Deps): Prom
   });
 }
 
+function parseDeviceFilter(raw: unknown): Set<number> | null {
+  if (raw === undefined) return null;
+  if (typeof raw !== "string" || raw.trim() === "") {
+    throw new HttpError(400, "INVALID_DEVICE_FILTER", "devices must be a comma-separated list");
+  }
+  const parts = raw.split(",").map((value) => Number(value.trim()));
+  if (
+    parts.length === 0 ||
+    parts.length > 100 ||
+    parts.some((id) => !Number.isInteger(id) || id < 1 || id > 2_147_483_647)
+  ) {
+    throw new HttpError(400, "INVALID_DEVICE_FILTER", "devices must contain valid signal device IDs");
+  }
+  return new Set(parts);
+}
+
 export async function registerKeyRoutes(app: FastifyInstance, deps: Deps): Promise<void> {
   const { db, tokens } = deps;
 
-  app.get("/v1/keys/:nexId", {
-    config: { rateLimit: { max: 60, timeWindow: "1 minute" } },
-  }, async (request, reply) => {
+  app.get("/v1/keys/:nexId/devices", async (request, reply) => {
     await requireAuth(request, db, tokens);
     const { nexId } = request.params as { nexId: string };
     const target = await getTargetUser(db, nexId);
@@ -217,15 +247,64 @@ export async function registerKeyRoutes(app: FastifyInstance, deps: Deps): Promi
       `SELECT * FROM devices WHERE user_id = $1 AND revoked_at IS NULL ORDER BY created_at`,
       [target.id],
     );
-    if (devices.length === 0) {
+    return reply.send({
+      user: publicUser(target),
+      devices: devices.map((device) => ({
+        deviceId: device.id,
+        signalDeviceId: device.signal_device_id,
+        // Public identity key only. Clients compare it with the identity bound
+        // to an existing session so a reinstalled device is detected before a
+        // message is encrypted to a stale ratchet.
+        identityKey: device.identity_key,
+      })),
+    });
+  });
+
+  app.get("/v1/keys/:nexId", {
+    config: { rateLimit: { max: 60, timeWindow: "1 minute" } },
+  }, async (request, reply) => {
+    await requireAuth(request, db, tokens);
+    const { nexId } = request.params as { nexId: string };
+    const target = await getTargetUser(db, nexId);
+    const filter = parseDeviceFilter((request.query as { devices?: unknown }).devices);
+    const activeDevices = await db.query<DeviceRow>(
+      `SELECT * FROM devices WHERE user_id = $1 AND revoked_at IS NULL ORDER BY created_at`,
+      [target.id],
+    );
+    if (activeDevices.length === 0) {
       throw new HttpError(409, "NO_ACTIVE_DEVICES", "This user has no active devices");
     }
+    const devices = filter
+      ? activeDevices.filter((device) => filter.has(device.signal_device_id))
+      : activeDevices;
 
     const bundles: Array<Record<string, unknown>> = [];
     const unavailableDeviceIds: string[] = [];
 
     for (const device of devices) {
       const bundle = await db.transaction(async (client) => {
+        // Serialize prekey distribution for this device. The Kyber key is a
+        // reusable last resort, so it is never marked used here. The one-time
+        // EC prekey is optional in X3DH and is consumed only when the whole
+        // bundle can actually be returned.
+        const locked = await client.query<DeviceRow>(
+          "SELECT * FROM devices WHERE id = $1 AND revoked_at IS NULL FOR UPDATE",
+          [device.id],
+        );
+        const current = locked.rows[0];
+        if (!current || current.kyber_pre_key_id == null) return null;
+
+        const kyberRow = await client.query<{
+          public_key: string;
+          signature: string;
+        }>(
+          `SELECT public_key, signature FROM kyber_prekeys
+           WHERE device_id = $1 AND key_id = $2`,
+          [current.id, current.kyber_pre_key_id],
+        );
+        const kyber = kyberRow.rows[0];
+        if (!kyber) return null;
+
         const preKeyRow = await client.query<{
           key_id: number;
           public_key: string;
@@ -233,46 +312,27 @@ export async function registerKeyRoutes(app: FastifyInstance, deps: Deps): Promi
           `SELECT key_id, public_key FROM one_time_prekeys
            WHERE device_id = $1 AND used_at IS NULL
            ORDER BY key_id ASC LIMIT 1 FOR UPDATE`,
-          [device.id],
+          [current.id],
         );
         const preKey = preKeyRow.rows[0];
         if (preKey) {
           await client.query(
             "UPDATE one_time_prekeys SET used_at = now() WHERE device_id = $1 AND key_id = $2",
-            [device.id, preKey.key_id],
+            [current.id, preKey.key_id],
           );
         }
 
-        const kyberRow = await client.query<{
-          key_id: number;
-          public_key: string;
-          signature: string;
-        }>(
-          `SELECT key_id, public_key, signature FROM kyber_prekeys
-           WHERE device_id = $1 AND used_at IS NULL
-           ORDER BY key_id ASC LIMIT 1 FOR UPDATE`,
-          [device.id],
-        );
-        const kyber = kyberRow.rows[0];
-        if (kyber) {
-          await client.query(
-            "UPDATE kyber_prekeys SET used_at = now() WHERE device_id = $1 AND key_id = $2",
-            [device.id, kyber.key_id],
-          );
-        }
-
-        if (!preKey || !kyber || device.kyber_pre_key_id == null) return null;
         return {
-          deviceId: device.id,
-          signalDeviceId: device.signal_device_id,
-          registrationId: device.registration_id,
-          identityKey: device.identity_key,
-          signedPreKeyId: device.signed_pre_key_id,
-          signedPreKeyPublic: device.signed_pre_key_public,
-          signedPreKeySignature: device.signed_pre_key_signature,
-          oneTimePreKeyId: preKey.key_id,
-          oneTimePreKeyPublic: preKey.public_key,
-          kyberPreKeyId: kyber.key_id,
+          deviceId: current.id,
+          signalDeviceId: current.signal_device_id,
+          registrationId: current.registration_id,
+          identityKey: current.identity_key,
+          signedPreKeyId: current.signed_pre_key_id,
+          signedPreKeyPublic: current.signed_pre_key_public,
+          signedPreKeySignature: current.signed_pre_key_signature,
+          oneTimePreKeyId: preKey?.key_id ?? null,
+          oneTimePreKeyPublic: preKey?.public_key ?? null,
+          kyberPreKeyId: current.kyber_pre_key_id,
           kyberPreKeyPublic: kyber.public_key,
           kyberPreKeySignature: kyber.signature,
         };
@@ -285,7 +345,7 @@ export async function registerKeyRoutes(app: FastifyInstance, deps: Deps): Promi
       throw new HttpError(
         409,
         "PREKEYS_EXHAUSTED",
-        "The recipient must reopen NEXCHAT to replenish encryption prekeys",
+        "The recipient must reopen NEXCHAT to publish encryption keys",
       );
     }
 

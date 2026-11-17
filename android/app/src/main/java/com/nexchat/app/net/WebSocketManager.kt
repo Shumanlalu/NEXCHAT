@@ -1,5 +1,11 @@
 package com.nexchat.app.net
 
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
+import android.os.SystemClock
 import com.nexchat.app.core.network.ApiClient
 import com.nexchat.app.core.network.ApiException
 import com.nexchat.app.core.network.EnvelopeDto
@@ -46,14 +52,20 @@ class WebSocketManager(
     private val chat: ChatRepository,
     private val auth: AuthRepository,
     private val scope: CoroutineScope,
+    context: Context,
 ) {
     private val running = AtomicBoolean(false)
+    private val connectivity = context.getSystemService(ConnectivityManager::class.java)
     private val _state = MutableStateFlow(ConnectionState.STOPPED)
     val state: StateFlow<ConnectionState> = _state.asStateFlow()
     @Volatile
     private var socket: WebSocket? = null
     private var loop: Job? = null
     private var poller: Job? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
+    @Volatile
+    private var lastNetworkRestart = 0L
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
@@ -65,18 +77,31 @@ class WebSocketManager(
                 delay(20_000L)
             }
         }
+        registerNetworkCallback()
+        startConnectionLoop()
+    }
+
+    private fun startConnectionLoop() {
+        loop?.cancel()
         loop = scope.launch {
             var backoff = 1_000L
             while (isActive && running.get()) {
-                _state.value = if (backoff > 1_000L) ConnectionState.RECONNECTING else ConnectionState.CONNECTING
-                val closed = connectOnce()
+                _state.value =
+                    if (backoff > 1_000L) ConnectionState.RECONNECTING else ConnectionState.CONNECTING
+                val opened = AtomicBoolean(false)
+                val closed = connectOnce { opened.set(true) }
                 if (!running.get()) break
                 closed.await()
+                if (!isActive) break
+                // A socket that actually opened proves the network path works.
+                // Start the next retry from the short delay instead of keeping
+                // the large backoff accumulated during an earlier outage.
+                if (opened.get()) backoff = 1_000L
                 _state.value = ConnectionState.RECONNECTING
                 delay(backoff)
                 backoff = (backoff * 2).coerceAtMost(60_000L)
             }
-            _state.value = ConnectionState.STOPPED
+            if (running.get()) _state.value = ConnectionState.STOPPED
         }
     }
 
@@ -87,6 +112,7 @@ class WebSocketManager(
 
     fun stop() {
         running.set(false)
+        unregisterNetworkCallback()
         socket?.close(1000, "client stopped")
         socket = null
         loop?.cancel()
@@ -96,7 +122,60 @@ class WebSocketManager(
         _state.value = ConnectionState.STOPPED
     }
 
-    private fun connectOnce(): CompletableDeferred<Unit> {
+    /**
+     * A Wi-Fi/cellular handoff leaves the old socket half-open for a long time.
+     * Reconnect as soon as Android reports a usable network instead of waiting
+     * for TCP timeouts or the 20-second polling fallback.
+     */
+    private fun registerNetworkCallback() {
+        if (networkCallback != null || connectivity == null) return
+        lastNetworkRestart = SystemClock.elapsedRealtime()
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) = reconnectNow()
+
+            override fun onCapabilitiesChanged(
+                network: Network,
+                capabilities: NetworkCapabilities,
+            ) {
+                if (
+                    capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                    capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+                ) {
+                    reconnectNow()
+                }
+            }
+
+            override fun onLost(network: Network) = reconnectNow()
+        }
+        networkCallback = callback
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+        runCatching { connectivity?.registerNetworkCallback(request, callback) }
+            .onFailure { networkCallback = null }
+    }
+
+    private fun unregisterNetworkCallback() {
+        val callback = networkCallback ?: return
+        networkCallback = null
+        runCatching { connectivity?.unregisterNetworkCallback(callback) }
+    }
+
+    private fun reconnectNow() {
+        if (!running.get()) return
+        val now = SystemClock.elapsedRealtime()
+        synchronized(this) {
+            // Network callbacks can arrive in bursts and the initial registration
+            // immediately reports the current network.
+            if (now - lastNetworkRestart < 2_000L) return
+            lastNetworkRestart = now
+        }
+        socket?.cancel()
+        socket = null
+        startConnectionLoop()
+    }
+
+    private fun connectOnce(onOpened: () -> Unit): CompletableDeferred<Unit> {
         val closed = CompletableDeferred<Unit>()
         val token = api.currentAccessToken()
         if (token.isNullOrBlank()) {
@@ -117,6 +196,7 @@ class WebSocketManager(
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 socket = webSocket
                 _state.value = ConnectionState.CONNECTED
+                onOpened()
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {

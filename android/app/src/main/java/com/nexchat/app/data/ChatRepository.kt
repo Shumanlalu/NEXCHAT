@@ -25,6 +25,7 @@ import com.nexchat.app.core.network.ApiException
 import com.nexchat.app.core.network.EnvelopeDto
 import com.nexchat.app.core.network.GroupDto
 import com.nexchat.app.core.network.KeyBundle
+import com.nexchat.app.core.network.KeyDeviceDto
 import com.nexchat.app.core.network.OutgoingEnvelope
 import com.nexchat.app.core.network.PreKeyDto
 import com.nexchat.app.core.network.RotateKeysRequest
@@ -86,6 +87,9 @@ class ChatRepository(
 
     private val sendMutex = Mutex()
     private val receiveMutex = Mutex()
+    private val replenishMutex = Mutex()
+    private val deviceCacheMutex = Mutex()
+    private val deviceCache = mutableMapOf<String, Pair<Long, List<KeyDeviceDto>>>()
     private val _events = MutableSharedFlow<ChatEvent>(extraBufferCapacity = 128)
     val events = _events.asSharedFlow()
     private val _activeConversation = MutableStateFlow<String?>(null)
@@ -328,6 +332,12 @@ class ChatRepository(
                 val acceptedClients = response.accepted.map { it.clientId }.toSet()
                 for (skipped in response.skipped.distinctBy { it.clientId }) {
                     if (skipped.clientId in acceptedClients) continue
+                    if (skipped.reason == "DEVICE_NOT_ACTIVE") {
+                        outboxDao.forClient(skipped.clientId)
+                            .map { it.recipientNexId }
+                            .distinct()
+                            .forEach { invalidateDeviceCache(it) }
+                    }
                     outboxDao.deleteForClient(skipped.clientId)
                     messageDao.updateStatus(skipped.clientId, MessageStatus.FAILED, System.currentTimeMillis())
                     messageDao.setError(skipped.clientId, skipReason(skipped.reason))
@@ -366,6 +376,33 @@ class ChatRepository(
     suspend fun pollPending() = withContext(Dispatchers.IO) {
         runCatching { receivePending() }
         runCatching { flushOutbox() }
+        // Replenish even while the socket stays open. A recipient that remains
+        // connected would otherwise never publish new one-time prekeys.
+        runCatching { replenishPreKeysIfNeeded() }
+    }
+
+    /**
+     * Drops the pairwise Signal session and trust record for one contact so the
+     * next send performs a fresh X3DH/PQXDH handshake. This is the explicit
+     * recovery path after a safety-number change; it intentionally requires a
+     * user action rather than silently accepting a new identity.
+     */
+    suspend fun resetSecuritySession(nexId: String) = withContext(Dispatchers.IO) {
+        val queuedClients = outboxDao.clientIdsForRecipient(nexId)
+        outboxDao.deleteForRecipient(nexId)
+        val now = System.currentTimeMillis()
+        for (clientId in queuedClients) {
+            if (outboxDao.countForClient(clientId) == 0) {
+                messageDao.updateStatus(clientId, MessageStatus.FAILED, now)
+                messageDao.setError(
+                    clientId,
+                    "Security session reset. Verify the new safety number, then send again.",
+                )
+            }
+        }
+        deviceCacheMutex.withLock { deviceCache.remove(nexId) }
+        contactDao.setVerified(nexId, null)
+        crypto.forgetIdentity(nexId)
     }
 
     private suspend fun receivePending() {
@@ -397,7 +434,7 @@ class ChatRepository(
                     _events.tryEmit(
                         ChatEvent.Security(
                             envelope.senderNexId,
-                            "The security number for this contact changed. Verify it before sending new messages.",
+                            "The security number for this contact changed. Verify it, then reset the security session from the contact screen.",
                         ),
                     )
                     if (acknowledge) runCatching { api.ackEnvelopes(listOf(envelope.id)) }
@@ -837,15 +874,67 @@ class ChatRepository(
     }
 
     private suspend fun resolveTargets(nexId: String): List<Target> {
-        val known = crypto.knownDeviceIds(nexId)
-        // Prekey bundles consume one-time keys server-side. Once a device has an
-        // established Signal session, reuse that session instead of fetching again.
-        if (known.isNotEmpty()) return known.map { Target(nexId, it, null) }
-        val bundles = runCatching { api.getKeyBundles(nexId) }.getOrNull()
-        if (bundles != null && bundles.devices.isNotEmpty()) {
-            return bundles.devices.map { Target(nexId, it.signalDeviceId, it) }
+        val known = crypto.knownDeviceIds(nexId).toSet()
+        // Always discover the current device set. A contact can add or replace a
+        // device at any time; using only cached session IDs would keep encrypting
+        // to an old, unreachable device forever.
+        val current = try {
+            currentDevices(nexId)
+        } catch (error: Exception) {
+            if (known.isNotEmpty()) {
+                // Offline fallback: established sessions still work without a
+                // device-list refresh. New devices are picked up on reconnect.
+                return known.map { Target(nexId, it, null) }
+            }
+            throw error
         }
-        throw ApiException(0, "NO_KEY_BUNDLE", "This contact has no active encryption keys. Ask them to open NEXCHAT.")
+        if (current.isEmpty()) {
+            throw ApiException(0, "NO_KEY_BUNDLE", "This contact has no active encryption keys. Ask them to open NEXCHAT.")
+        }
+
+        val targets = mutableListOf<Target>()
+        for (device in current.filter { it.signalDeviceId in known }) {
+            // The server device list is authoritative. If the public identity key
+            // no longer matches the key bound to our session, stop before sending
+            // and require the user to verify the contact's new safety number.
+            val trusted = crypto.peerIdentity(nexId, device.signalDeviceId)
+            if (trusted != null && trusted != device.identityKey) {
+                throw IdentityChangedException(nexId)
+            }
+            targets += Target(nexId, device.signalDeviceId, null)
+        }
+        val missing = current.filterNot { it.signalDeviceId in known }
+        if (missing.isNotEmpty()) {
+            // Only unknown devices consume a one-time prekey. Known sessions stay
+            // on their existing ratchet and do not burn the contact's key pool.
+            val bundles = api.getKeyBundles(nexId, missing.map { it.signalDeviceId }.toSet())
+            val byDevice = bundles.devices.associateBy { it.signalDeviceId }
+            for (device in missing) {
+                byDevice[device.signalDeviceId]?.let { targets += Target(nexId, device.signalDeviceId, it) }
+            }
+        }
+        if (targets.isEmpty()) {
+            throw ApiException(0, "NO_KEY_BUNDLE", "This contact has no usable encryption keys. Ask them to open NEXCHAT.")
+        }
+        return targets.distinctBy { it.signalDeviceId }
+    }
+
+    private suspend fun currentDevices(nexId: String): List<KeyDeviceDto> {
+        val now = System.currentTimeMillis()
+        deviceCacheMutex.withLock {
+            deviceCache[nexId]?.let { (cachedAt, devices) ->
+                if (now - cachedAt < DEVICE_CACHE_MILLIS) return devices
+            }
+        }
+        val response = api.getKeyDevices(nexId)
+        // Keep the server order but remove duplicate signal device IDs.
+        val devices = response.devices.distinctBy { it.signalDeviceId }
+        deviceCacheMutex.withLock { deviceCache[nexId] = now to devices }
+        return devices
+    }
+
+    private suspend fun invalidateDeviceCache(nexId: String) {
+        deviceCacheMutex.withLock { deviceCache.remove(nexId) }
     }
 
     private suspend fun enqueue(conversation: ConversationEntity, content: SecureContent, targets: List<Target>) {
@@ -945,20 +1034,25 @@ class ChatRepository(
     }
 
     private suspend fun replenishPreKeysIfNeeded() = withContext(Dispatchers.IO) {
-        val count = api.preKeyCount()
-        if (count.oneTimePreKeys >= 10 && count.kyberPreKeys >= 1) return@withContext
-        val batch = crypto.newUploadBatch()
-        api.rotateKeys(
-            RotateKeysRequest(
-                signedPreKeyId = batch.signedPreKeyId,
-                signedPreKeyPublic = batch.signedPreKeyPublic,
-                signedPreKeySignature = batch.signedPreKeySignature,
-                kyberPreKeyId = batch.kyberPreKeyId,
-                kyberPreKeyPublic = batch.kyberPreKeyPublic,
-                kyberPreKeySignature = batch.kyberPreKeySignature,
-                oneTimePreKeys = batch.oneTimePreKeys.map { PreKeyDto(it.first, it.second) },
-            ),
-        )
+        if (!replenishMutex.tryLock()) return@withContext
+        try {
+            val count = api.preKeyCount()
+            if (count.oneTimePreKeys >= 10 && count.kyberPreKeys >= 1) return@withContext
+            val batch = crypto.newUploadBatch()
+            api.rotateKeys(
+                RotateKeysRequest(
+                    signedPreKeyId = batch.signedPreKeyId,
+                    signedPreKeyPublic = batch.signedPreKeyPublic,
+                    signedPreKeySignature = batch.signedPreKeySignature,
+                    kyberPreKeyId = batch.kyberPreKeyId,
+                    kyberPreKeyPublic = batch.kyberPreKeyPublic,
+                    kyberPreKeySignature = batch.kyberPreKeySignature,
+                    oneTimePreKeys = batch.oneTimePreKeys.map { PreKeyDto(it.first, it.second) },
+                ),
+            )
+        } finally {
+            replenishMutex.unlock()
+        }
     }
 
     suspend fun markDelivered(clientId: String) = withContext(Dispatchers.IO) {
@@ -1045,9 +1139,10 @@ class ChatRepository(
 
     private fun friendlyError(error: Exception): String = when {
         error is ApiException && error.code == "PREKEYS_EXHAUSTED" ->
-            "This contact's encryption keys are exhausted. Ask them to reopen NEXCHAT."
+            "This contact has not published encryption keys. Ask them to reopen NEXCHAT."
         error is ApiException && error.code == "RECIPIENT_NOT_FOUND" -> "This account no longer exists"
-        error is IdentityChangedException -> "Safety number changed. Verify the contact before continuing."
+        error is IdentityChangedException ->
+            "Safety number changed. Verify it, then reset the security session from the contact screen."
         else -> error.message ?: "Message could not be encrypted"
     }
 
@@ -1076,3 +1171,5 @@ private val reactionsSerializer = MapSerializer(
     String.serializer(),
     ListSerializer(String.serializer()),
 )
+
+private const val DEVICE_CACHE_MILLIS = 60_000L

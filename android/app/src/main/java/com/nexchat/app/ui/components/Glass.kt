@@ -115,6 +115,21 @@ fun SilverBackground(modifier: Modifier = Modifier, content: @Composable () -> U
                 size = Size(size.width * 1.05f, size.height * 0.55f),
                 style = Stroke(width = size.width * 0.04f),
             )
+            // A single diagonal highlight reads as a brushed-metal pane without
+            // the cost or unpredictability of a WebGL surface.
+            drawRect(
+                brush = Brush.linearGradient(
+                    colorStops = arrayOf(
+                        0.0f to Color.Transparent,
+                        0.38f to Color.White.copy(alpha = if (palette.dark) 0.035f else 0.16f),
+                        0.5f to Color.White.copy(alpha = if (palette.dark) 0.05f else 0.22f),
+                        0.62f to Color.White.copy(alpha = if (palette.dark) 0.025f else 0.10f),
+                        1.0f to Color.Transparent,
+                    ),
+                    start = Offset(0f, size.height * 0.08f),
+                    end = Offset(size.width, size.height * 0.92f),
+                ),
+            )
         }
         content()
     }

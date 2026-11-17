@@ -601,7 +601,7 @@ private fun MessageBubble(
     ) {
         Column(
             Modifier
-                .widthIn(max = 340.dp)
+                .widthIn(min = 84.dp, max = 340.dp)
                 .clip(bubbleShape)
                 .background(
                     if (outgoing) {
@@ -624,13 +624,14 @@ private fun MessageBubble(
                     style = MaterialTheme.typography.labelMedium.copy(fontSize = 10.sp),
                     color = palette.accent,
                     fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
                 Spacer(Modifier.height(3.dp))
             }
             if (!message.replyToPreview.isNullOrBlank()) {
                 Row(
                     Modifier
-                        .fillMaxWidth()
                         .clip(RoundedCornerShape(10.dp))
                         .background(Color.White.copy(alpha = if (outgoing) 0.08f else 0.45f))
                         .padding(8.dp),
@@ -662,7 +663,7 @@ private fun MessageBubble(
             } else {
                 Text(
                     message.body,
-                    style = MaterialTheme.typography.bodyLarge.copy(fontSize = 15.sp),
+                    style = MaterialTheme.typography.bodyLarge.copy(fontSize = 15.sp, lineHeight = 21.sp),
                     color = textColor,
                 )
             }
@@ -693,7 +694,7 @@ private fun MessageBubble(
             }
             Spacer(Modifier.height(3.dp))
             Row(
-                Modifier.fillMaxWidth(),
+                Modifier.align(Alignment.End),
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -720,6 +721,7 @@ private fun MessageBubble(
                     message.error,
                     style = MaterialTheme.typography.labelMedium.copy(fontSize = 9.sp),
                     color = if (outgoing) Color(0xFFFFC2CD) else palette.danger,
+                    modifier = Modifier.align(if (outgoing) Alignment.End else Alignment.Start),
                 )
             }
         }

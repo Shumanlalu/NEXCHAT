@@ -9,6 +9,7 @@ import java.util.UUID
 import org.signal.libsignal.protocol.IdentityKey
 import org.signal.libsignal.protocol.IdentityKeyPair
 import org.signal.libsignal.protocol.InvalidKeyIdException
+import org.signal.libsignal.protocol.ReusedBaseKeyException
 import org.signal.libsignal.protocol.SignalProtocolAddress
 import org.signal.libsignal.protocol.ecc.ECKeyPair
 import org.signal.libsignal.protocol.groups.state.SenderKeyRecord
@@ -57,6 +58,7 @@ class NexSignalStore(private val db: NexDatabase) : SignalProtocolStore {
     private val kyberPreKeys = linkedMapOf<Int, KyberPreKeyRecord>()
     private val sessions = linkedMapOf<String, SessionRecord>()
     private val trustedIdentities = linkedMapOf<String, IdentityKey>()
+    private val usedKyberBaseKeys = mutableSetOf<String>()
     private var initialized = false
 
     suspend fun initialize() {
@@ -90,6 +92,9 @@ class NexSignalStore(private val db: NexDatabase) : SignalProtocolStore {
                     row.key.startsWith(PREFIX_IDENTITY_PEER) -> {
                         val address = row.key.removePrefix(PREFIX_IDENTITY_PEER)
                         trustedIdentities[address] = IdentityKey(row.value)
+                    }
+                    row.key.startsWith(PREFIX_KYBER_USED) -> {
+                        usedKyberBaseKeys += row.key.removePrefix(PREFIX_KYBER_USED)
                     }
                 }
             }
@@ -207,6 +212,7 @@ class NexSignalStore(private val db: NexDatabase) : SignalProtocolStore {
             kyberPreKeys.clear()
             sessions.clear()
             trustedIdentities.clear()
+            usedKyberBaseKeys.clear()
             initialized = false
         }
     }
@@ -353,10 +359,20 @@ class NexSignalStore(private val db: NexDatabase) : SignalProtocolStore {
         kyberPreKeyId: Int,
         baseKeyId: Int,
         baseKey: ECPublicKey,
-    ) {
-        // The server issues Kyber prekeys once. libsignal's base-key reuse check still
-        // runs inside decrypt; we intentionally keep the private key available for
-        // delayed or retransmitted prekey messages. No plaintext is retained here.
+    ) = synchronized(lock) {
+        // The server publishes one reusable last-resort Kyber prekey so a fresh
+        // sender never fails just because another sender consumed it. That makes
+        // replay detection our responsibility: persist the exact
+        // (Kyber prekey, signed prekey, base key) tuple and reject a second use.
+        // The private Kyber key stays available for delayed prekey messages.
+        if (!kyberPreKeys.containsKey(kyberPreKeyId)) {
+            throw InvalidKeyIdException("No Kyber prekey for ID $kyberPreKeyId")
+        }
+        val tuple = "$kyberPreKeyId|$baseKeyId|${base64(baseKey.serialize())}"
+        if (!usedKyberBaseKeys.add(tuple)) {
+            throw ReusedBaseKeyException("This Kyber prekey was already used with the same base key")
+        }
+        persist(PREFIX_KYBER_USED + tuple, ByteArray(0))
     }
 
     override fun storeSenderKey(address: SignalProtocolAddress, distributionId: UUID, record: SenderKeyRecord) {
@@ -438,5 +454,6 @@ class NexSignalStore(private val db: NexDatabase) : SignalProtocolStore {
         const val PREFIX_KYBER = "kyber_prekey|"
         const val PREFIX_SESSION = "session|"
         const val PREFIX_IDENTITY_PEER = "identity_peer|"
+        const val PREFIX_KYBER_USED = "kyber_used|"
     }
 }

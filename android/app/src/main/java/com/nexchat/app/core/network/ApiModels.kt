@@ -137,11 +137,26 @@ data class KeyBundle(
     val signedPreKeyId: Int,
     val signedPreKeyPublic: String,
     val signedPreKeySignature: String,
-    val oneTimePreKeyId: Int,
-    val oneTimePreKeyPublic: String,
+    // X3DH remains valid without a one-time prekey. The server omits these
+    // fields when its one-time pool is empty instead of failing the handshake.
+    val oneTimePreKeyId: Int? = null,
+    val oneTimePreKeyPublic: String? = null,
     val kyberPreKeyId: Int,
     val kyberPreKeyPublic: String,
     val kyberPreKeySignature: String,
+)
+
+@Serializable
+data class KeyDeviceDto(
+    val deviceId: String,
+    val signalDeviceId: Int,
+    val identityKey: String,
+)
+
+@Serializable
+data class KeyDevicesResponse(
+    val user: AuthUser,
+    val devices: List<KeyDeviceDto>,
 )
 
 @Serializable
@@ -242,8 +257,8 @@ data class LimitDto(
 data class FeatureDto(
     val e2ee: String = "libsignal",
     val groupEncryption: String = "pairwise-libsignal",
-    val nearbyRelay: String = "client-only",
-    val audioCalls: String = "webrtc",
+    val nearbyRelay: String = "unavailable",
+    val audioCalls: String = "unavailable",
     val pushNotifications: Boolean = false,
 )
 

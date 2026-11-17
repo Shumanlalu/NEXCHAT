@@ -86,6 +86,7 @@ fun ContactDetailScreen(
     val snackbar = remember { SnackbarHostState() }
     var confirmBlock by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var confirmReset by remember { mutableStateOf(false) }
     var showReport by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
@@ -262,6 +263,12 @@ fun ContactDetailScreen(
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 4.dp),
                 ) {
                     DetailAction(
+                        icon = Icons.Outlined.Refresh,
+                        title = "Reset security session",
+                        onClick = { confirmReset = true },
+                    )
+                    DetailDivider()
+                    DetailAction(
                         icon = Icons.Outlined.Block,
                         title = if (contact?.blocked == true) "Unblock contact" else "Block contact",
                         destructive = contact?.blocked != true,
@@ -296,6 +303,20 @@ fun ContactDetailScreen(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(bottom = 24.dp, start = 16.dp, end = 16.dp),
+        )
+    }
+
+    if (confirmReset) {
+        ConfirmDialog(
+            title = "Reset the security session?",
+            message = "This deletes the local encryption session and queued ciphertext for this contact. Verify the new safety number before sending again. Use this only after the contact reinstalled NEXCHAT or their safety number changed.",
+            confirmLabel = "Reset",
+            destructive = true,
+            onConfirm = {
+                confirmReset = false
+                vm.resetSecuritySession()
+            },
+            onDismiss = { confirmReset = false },
         )
     }
 

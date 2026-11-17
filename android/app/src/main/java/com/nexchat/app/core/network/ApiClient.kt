@@ -126,8 +126,20 @@ class ApiClient(
     suspend fun presence(nexId: String): PresenceResponse =
         decode(authenticated("GET", "/v1/presence/${encodePath(nexId)}"))
 
-    suspend fun getKeyBundles(nexId: String): KeyBundleResponse =
-        decode(authenticated("GET", "/v1/keys/${encodePath(nexId)}"))
+    suspend fun getKeyDevices(nexId: String): KeyDevicesResponse =
+        decode(authenticated("GET", "/v1/keys/${encodePath(nexId)}/devices"))
+
+    suspend fun getKeyBundles(
+        nexId: String,
+        signalDeviceIds: Set<Int>? = null,
+    ): KeyBundleResponse {
+        val filter = signalDeviceIds
+            ?.takeIf { it.isNotEmpty() }
+            ?.joinToString(",")
+            ?.let { "?devices=${encodeQuery(it)}" }
+            .orEmpty()
+        return decode(authenticated("GET", "/v1/keys/${encodePath(nexId)}$filter"))
+    }
 
     suspend fun rotateKeys(request: RotateKeysRequest) {
         authenticated("POST", "/v1/devices/keys", json.encodeToString(request))

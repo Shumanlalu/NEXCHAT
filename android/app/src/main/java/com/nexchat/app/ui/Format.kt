@@ -3,8 +3,10 @@ package com.nexchat.app.ui
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Matrix
 import android.net.Uri
 import android.util.Base64
+import androidx.exifinterface.media.ExifInterface
 import com.nexchat.app.core.network.NexJson
 import java.io.ByteArrayOutputStream
 import java.time.Instant
@@ -61,25 +63,71 @@ fun reactionSummary(raw: String): List<Pair<String, Int>> =
         .sortedByDescending { it.second }
 
 fun encodeAvatar(context: Context, uri: Uri): String? = runCatching {
-    val source = context.contentResolver.openInputStream(uri)?.use { stream ->
-        BitmapFactory.decodeStream(stream)
+    val orientation = context.contentResolver.openInputStream(uri)?.use { stream ->
+        runCatching {
+            ExifInterface(stream).getAttributeInt(
+                ExifInterface.TAG_ORIENTATION,
+                ExifInterface.ORIENTATION_NORMAL,
+            )
+        }.getOrDefault(ExifInterface.ORIENTATION_NORMAL)
+    } ?: ExifInterface.ORIENTATION_NORMAL
+
+    // Read the dimensions first so a large camera photo is downsampled during
+    // decode instead of allocating the full-size bitmap.
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    context.contentResolver.openInputStream(uri)?.use {
+        BitmapFactory.decodeStream(it, null, bounds)
+    }
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+    val sample = maxOf(1, maxOf(bounds.outWidth, bounds.outHeight) / 1280)
+    val options = BitmapFactory.Options().apply {
+        inSampleSize = sample
+        inPreferredConfig = Bitmap.Config.ARGB_8888
+    }
+    val decoded = context.contentResolver.openInputStream(uri)?.use { stream ->
+        BitmapFactory.decodeStream(stream, null, options)
     } ?: return@runCatching null
-    val largest = maxOf(source.width, source.height)
+
+    val matrix = Matrix()
+    when (orientation) {
+        ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.setScale(-1f, 1f)
+        ExifInterface.ORIENTATION_ROTATE_180 -> matrix.setRotate(180f)
+        ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.setScale(1f, -1f)
+        ExifInterface.ORIENTATION_TRANSPOSE -> {
+            matrix.setRotate(90f)
+            matrix.postScale(-1f, 1f)
+        }
+        ExifInterface.ORIENTATION_ROTATE_90 -> matrix.setRotate(90f)
+        ExifInterface.ORIENTATION_TRANSVERSE -> {
+            matrix.setRotate(-90f)
+            matrix.postScale(-1f, 1f)
+        }
+        ExifInterface.ORIENTATION_ROTATE_270 -> matrix.setRotate(-90f)
+    }
+    val oriented = if (matrix.isIdentity) {
+        decoded
+    } else {
+        Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+            .also { if (it !== decoded) decoded.recycle() }
+    }
+
+    val largest = maxOf(oriented.width, oriented.height)
     val scale = if (largest > 640) 640f / largest else 1f
     val scaled = if (scale < 1f) {
         Bitmap.createScaledBitmap(
-            source,
-            (source.width * scale).toInt().coerceAtLeast(1),
-            (source.height * scale).toInt().coerceAtLeast(1),
+            oriented,
+            (oriented.width * scale).toInt().coerceAtLeast(1),
+            (oriented.height * scale).toInt().coerceAtLeast(1),
             true,
-        )
+        ).also { if (it !== oriented) oriented.recycle() }
     } else {
-        source
+        oriented
     }
+
     val output = ByteArrayOutputStream()
+    // Re-encoding drops EXIF, GPS, and every other source metadata block.
     scaled.compress(Bitmap.CompressFormat.JPEG, 82, output)
-    if (scaled !== source) scaled.recycle()
-    source.recycle()
+    scaled.recycle()
     val bytes = output.toByteArray()
     if (bytes.size > 680_000) null else Base64.encodeToString(bytes, Base64.NO_WRAP)
 }.getOrNull()
