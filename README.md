@@ -24,7 +24,7 @@ numbers, and per-device sessions.
 | Reliability | Retry loop, reusable last-resort Kyber prekeys, optional one-time prekeys, device-list refresh, duplicate-envelope detection, 20-second queued-message polling fallback |
 | Identity verification | Per-device numeric safety numbers, contact-level verification marker, proactive identity-change detection, manual session reset from the contact screen |
 | Attachments | Not implemented in this build; avatar uploads are re-encoded to strip EXIF/GPS metadata |
-| Voice/video calls | Not implemented in this build |
+| Voice calls | One-to-one WebRTC audio; SDP and ICE travel inside Signal envelopes. Video is not implemented |
 | Bluetooth LE nearby messaging | Not implemented in this build |
 | Offline voice-note transcription | Not implemented; there is no audio recording or attachment pipeline |
 | QR device linking | Not implemented; sign in separately on each device |
@@ -48,6 +48,13 @@ numbers, and per-device sessions.
 - The release Android build requires HTTPS/WSS. Cleartext HTTP is enabled only in
   the debug build for local emulator development.
 - Screenshot blocking is available as an opt-in setting.
+- One-to-one voice calls use WebRTC with DTLS-SRTP for media. Call offers,
+  answers, and ICE candidates are sent as ordinary encrypted Signal content, so
+  the relay sees only ciphertext and the same envelope metadata it already sees
+  for messages. Call history is stored in the encrypted local database.
+- Calls are audio only and limited to direct chats. The server publishes STUN
+  configuration; deployments that need to traverse restrictive or symmetric NATs
+  must also configure a TURN service in `ICE_SERVERS_JSON`.
 
 No custom cipher is used. Do not treat the server operator as trusted for
 confidentiality: they can observe traffic metadata and can withhold or delay
@@ -213,10 +220,20 @@ only to the HTTPS server baked into that build.
   best-effort because a socket may be held by a different function instance from
   the HTTP request. Queued ciphertext is still fetched by polling; treat the
   delivered tick as eventually consistent on that host.
-- Calls, Bluetooth LE nearby delivery, attachments, offline voice-note
-  transcription, and QR device linking are intentionally absent and reported as
-  unavailable in the UI. There is no WebGL/3D renderer; the silver interface is
-  drawn natively with Jetpack Compose.
+- Bluetooth LE nearby delivery, attachments, offline voice-note transcription,
+  and QR device linking are intentionally absent and reported as unavailable in
+  the UI. There is no WebGL/3D renderer; the silver interface is drawn natively
+  with Jetpack Compose.
+- Voice calls are one-to-one audio only; there is no video, group calling, or
+  call recording. Like messages, incoming calls require the app process or
+  foreground service to be connected. Without push notifications, a killed app
+  cannot receive a call. Incoming-call alerts also depend on notification and
+  full-screen-intent permission on newer Android versions.
+- The default deployment configures public Google STUN servers but no TURN
+  relay. Calls between peers behind restrictive or symmetric NATs can therefore
+  fail to connect until the operator sets `ICE_SERVERS_JSON` to include a TURN
+  service. Call quality, echo cancellation, and NAT traversal have not been
+  verified on physical devices in this workspace.
 - Safety-number verification is currently stored per contact rather than
   independently per peer device. The screen lists the fingerprint for each known
   device; a changed identity clears the contact's verified marker.

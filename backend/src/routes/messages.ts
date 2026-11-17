@@ -291,7 +291,7 @@ export async function registerMessageRoutes(app: FastifyInstance, deps: Deps): P
         e2ee: "libsignal",
         groupEncryption: "pairwise-libsignal",
         nearbyRelay: "unavailable",
-        audioCalls: "unavailable",
+        audioCalls: "webrtc-audio-1to1",
         pushNotifications: false,
       },
     });

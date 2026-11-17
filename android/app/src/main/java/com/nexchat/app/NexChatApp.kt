@@ -4,10 +4,13 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
+import android.media.AudioAttributes
+import android.media.RingtoneManager
 import android.os.Build
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
+import com.nexchat.app.call.CallManager
 import com.nexchat.app.core.crypto.NexSignalStore
 import com.nexchat.app.core.crypto.SignalCryptoManager
 import com.nexchat.app.core.db.DatabaseProvider
@@ -50,6 +53,7 @@ class AppContainer(val app: Application) {
     val auth: AuthRepository by lazy { AuthRepository(db, api, secure, crypto, settings, scope) }
     val chat: ChatRepository by lazy { ChatRepository(db, api, crypto, settings) }
     val contacts: ContactRepository by lazy { ContactRepository(db, api, crypto) }
+    val call: CallManager by lazy { CallManager(app, scope, chat, api, notifications) }
     val websocket: WebSocketManager by lazy { WebSocketManager(api, chat, auth, scope, app) }
 
     private val _startupError = MutableStateFlow<String?>(null)
@@ -79,6 +83,9 @@ class AppContainer(val app: Application) {
             auth.state.collectLatest { state ->
                 if (state is AuthState.LoggedIn) {
                     websocket.start()
+                    // Repair one-time/Kyber key exhaustion after upgrades and
+                    // reconnects so contacts can always fetch a usable bundle.
+                    scope.launch { runCatching { chat.ensurePublishedKeys() } }
                 } else {
                     websocket.stop()
                 }
@@ -99,6 +106,7 @@ class AppContainer(val app: Application) {
                     is ChatEvent.Security -> {
                         notifications.showSecurity(event.nexId, event.message)
                     }
+                    is ChatEvent.Call -> call.onSignal(event.event)
                     else -> Unit
                 }
             }
@@ -127,6 +135,23 @@ class AppContainer(val app: Application) {
             ).apply {
                 description = "End-to-end encrypted messages"
                 setShowBadge(true)
+            },
+        )
+        manager.createNotificationChannel(
+            NotificationChannel(
+                NotificationHelper.CHANNEL_CALLS,
+                app.getString(R.string.notification_channel_calls),
+                NotificationManager.IMPORTANCE_HIGH,
+            ).apply {
+                description = "Incoming end-to-end encrypted voice calls"
+                setShowBadge(true)
+                enableVibration(true)
+                setSound(
+                    RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE),
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                        .build(),
+                )
             },
         )
         manager.createNotificationChannel(

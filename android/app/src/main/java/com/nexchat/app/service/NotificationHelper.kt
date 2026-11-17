@@ -7,6 +7,8 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import com.nexchat.app.MainActivity
 import com.nexchat.app.R
+import com.nexchat.app.call.CallActionReceiver
+import com.nexchat.app.call.CallActivity
 import com.nexchat.app.core.db.ConversationEntity
 import com.nexchat.app.core.db.MessageEntity
 import kotlin.math.absoluteValue
@@ -74,6 +76,72 @@ class NotificationHelper(private val context: Context) {
         }
     }
 
+    fun showIncomingCall(callId: String, peerName: String) {
+        val fullIntent = Intent(context, CallActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra(CallActivity.EXTRA_CALL_ID, callId)
+            putExtra(CallActivity.EXTRA_AUTO_ACCEPT, false)
+        }
+        val fullScreen = PendingIntent.getActivity(
+            context,
+            callId.hashCode(),
+            fullIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        // The Answer action must launch the activity directly. Starting an
+        // activity from a broadcast receiver is blocked by background-activity
+        // limits on newer Android releases, while a notification action is
+        // allowed to open its UI. CallActivity then requests the microphone
+        // permission before accepting the call.
+        val answer = PendingIntent.getActivity(
+            context,
+            ("answer:$callId").hashCode(),
+            Intent(context, CallActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP
+                putExtra(CallActivity.EXTRA_CALL_ID, callId)
+                putExtra(CallActivity.EXTRA_AUTO_ACCEPT, true)
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val decline = PendingIntent.getBroadcast(
+            context,
+            ("decline:$callId").hashCode(),
+            Intent(context, CallActionReceiver::class.java).apply {
+                action = CallActionReceiver.ACTION_DECLINE
+                putExtra(CallActionReceiver.EXTRA_CALL_ID, callId)
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val call = NotificationCompat.Builder(context, CHANNEL_CALLS)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle(peerName.ifBlank { "Incoming call" })
+            .setContentText("Incoming end-to-end encrypted voice call")
+            .setContentIntent(fullScreen)
+            .setFullScreenIntent(fullScreen, true)
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setOngoing(true)
+            .setAutoCancel(false)
+            .setOnlyAlertOnce(false)
+            .addAction(0, "Decline", decline)
+            .addAction(0, "Answer", answer)
+            .build()
+        runCatching {
+            NotificationManagerCompat.from(context).notify(CALL_NOTIFICATION_ID, call)
+        }
+    }
+
+    fun cancelIncomingCall() {
+        runCatching {
+            NotificationManagerCompat.from(context).cancel(CALL_NOTIFICATION_ID)
+        }
+    }
+
     fun serviceNotification(): android.app.Notification {
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -99,8 +167,10 @@ class NotificationHelper(private val context: Context) {
 
     companion object {
         const val CHANNEL_MESSAGES = "nexchat_messages_v1"
+        const val CHANNEL_CALLS = "nexchat_calls_v1"
         const val CHANNEL_SERVICE = "nexchat_service_v1"
         const val EXTRA_CONVERSATION_ID = "conversation_id"
         const val SERVICE_NOTIFICATION_ID = 4801
+        const val CALL_NOTIFICATION_ID = 4802
     }
 }

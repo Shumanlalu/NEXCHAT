@@ -258,7 +258,7 @@ data class FeatureDto(
     val e2ee: String = "libsignal",
     val groupEncryption: String = "pairwise-libsignal",
     val nearbyRelay: String = "unavailable",
-    val audioCalls: String = "unavailable",
+    val audioCalls: String = "webrtc-audio-1to1",
     val pushNotifications: Boolean = false,
 )
 

@@ -10,6 +10,7 @@ import com.nexchat.app.core.crypto.GroupMemberInfo
 import com.nexchat.app.core.crypto.IdentityChangedException
 import com.nexchat.app.core.crypto.SecureContent
 import com.nexchat.app.core.crypto.SignalCryptoManager
+import com.nexchat.app.core.db.CallHistoryEntity
 import com.nexchat.app.core.db.ContactEntity
 import com.nexchat.app.core.db.ConversationEntity
 import com.nexchat.app.core.db.GroupEntity
@@ -53,11 +54,55 @@ data class TypingEvent(val conversationId: String, val fromNexId: String, val ac
 data class IncomingMessageEvent(val conversation: ConversationEntity, val message: MessageEntity)
 
 sealed interface CallSignalEvent {
-    data class Offer(val conversationId: String, val fromNexId: String, val callId: String, val sdp: String) : CallSignalEvent
-    data class Answer(val conversationId: String, val callId: String, val sdp: String) : CallSignalEvent
-    data class Ice(val conversationId: String, val callId: String, val candidate: String, val sdpMid: String?, val index: Int?) : CallSignalEvent
-    data class Ended(val conversationId: String, val callId: String, val reason: String?) : CallSignalEvent
-    data class Rejected(val conversationId: String, val callId: String) : CallSignalEvent
+    val conversationId: String
+    val callId: String
+    val fromNexId: String
+    val fromSignalDeviceId: Int
+    val sentAt: Long
+
+    data class Offer(
+        override val conversationId: String,
+        override val fromNexId: String,
+        override val fromSignalDeviceId: Int,
+        override val callId: String,
+        override val sentAt: Long,
+        val displayName: String?,
+        val sdp: String,
+    ) : CallSignalEvent
+    data class Answer(
+        override val conversationId: String,
+        override val fromNexId: String,
+        override val fromSignalDeviceId: Int,
+        override val callId: String,
+        override val sentAt: Long,
+        val sdp: String,
+    ) : CallSignalEvent
+    data class Ice(
+        override val conversationId: String,
+        override val fromNexId: String,
+        override val fromSignalDeviceId: Int,
+        override val callId: String,
+        override val sentAt: Long,
+        val candidate: String,
+        val sdpMid: String?,
+        val index: Int?,
+    ) : CallSignalEvent
+    data class Ended(
+        override val conversationId: String,
+        override val fromNexId: String,
+        override val fromSignalDeviceId: Int,
+        override val callId: String,
+        override val sentAt: Long,
+        val reason: String?,
+    ) : CallSignalEvent
+    data class Rejected(
+        override val conversationId: String,
+        override val fromNexId: String,
+        override val fromSignalDeviceId: Int,
+        override val callId: String,
+        override val sentAt: Long,
+        val reason: String?,
+    ) : CallSignalEvent
 }
 
 sealed interface ChatEvent {
@@ -65,6 +110,7 @@ sealed interface ChatEvent {
     data class Incoming(val event: IncomingMessageEvent) : ChatEvent
     data class Call(val event: CallSignalEvent) : ChatEvent
     data class Security(val nexId: String, val message: String) : ChatEvent
+    data class Warning(val conversationId: String, val message: String) : ChatEvent
     data class Delivery(val messageId: String) : ChatEvent
 }
 
@@ -83,6 +129,7 @@ class ChatRepository(
     private val groupDao = db.groupDao()
     private val outboxDao = db.outboxDao()
     private val processedDao = db.processedEnvelopeDao()
+    private val callHistoryDao = db.callHistoryDao()
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = false; explicitNulls = false }
 
     private val sendMutex = Mutex()
@@ -276,6 +323,12 @@ class ChatRepository(
     suspend fun sendCallSignal(conversationId: String, content: SecureContent, durable: Boolean = true) =
         withContext(Dispatchers.IO) {
             val conversation = conversationDao.get(conversationId) ?: return@withContext
+            // Calling is an explicit 1:1 feature. Never fan a call out to a
+            // group or to a contact who has been blocked.
+            if (conversation.type != "DM") return@withContext
+            val peer = conversation.peerNexId ?: return@withContext
+            if (contactDao.get(peer)?.blocked == true) return@withContext
+            if (content.callId.isNullOrBlank()) return@withContext
             val profile = profileDao.get() ?: return@withContext
             val filled = content.copy(
                 senderNexId = profile.nexId,
@@ -458,7 +511,10 @@ class ChatRepository(
     }
 
     private suspend fun handleContent(envelope: EnvelopeDto, content: SecureContent) {
-        val senderNexId = content.senderNexId ?: envelope.senderNexId
+        // Identity always comes from the authenticated Signal envelope. The
+        // display fields inside the encrypted payload are self-asserted and
+        // must never be allowed to impersonate another NEX ID.
+        val senderNexId = envelope.senderNexId
         upsertSender(senderNexId, content)
         when (content.kind) {
             ContentKind.TEXT -> handleIncomingText(envelope, content, senderNexId)
@@ -466,7 +522,7 @@ class ChatRepository(
             ContentKind.DELETE -> content.targetClientId?.let {
                 messageDao.applyDeleteForEveryone(it, System.currentTimeMillis())
             }
-            ContentKind.REACTION -> handleReaction(content)
+            ContentKind.REACTION -> handleReaction(content, senderNexId)
             ContentKind.READ -> {
                 if (settings.state.value.readReceipts) {
                     val ids = content.readClientIds
@@ -474,7 +530,7 @@ class ChatRepository(
                 }
             }
             ContentKind.TYPING -> {
-                val conversationId = conversationIdFor(envelope, content)
+                val conversationId = conversationIdFor(envelope)
                 _events.tryEmit(
                     ChatEvent.Typing(
                         TypingEvent(conversationId, senderNexId, content.text == "1"),
@@ -482,39 +538,112 @@ class ChatRepository(
                 )
             }
             ContentKind.GROUP_META -> handleGroupMeta(content, senderNexId)
-            ContentKind.CALL_OFFER -> {
-                val cid = conversationIdFor(envelope, content)
-                content.sdp?.let { sdp ->
-                    content.callId?.let { _events.tryEmit(ChatEvent.Call(CallSignalEvent.Offer(cid, senderNexId, it, sdp))) }
-                }
-            }
-            ContentKind.CALL_ANSWER -> {
-                val cid = conversationIdFor(envelope, content)
-                content.sdp?.let { sdp ->
-                    content.callId?.let { _events.tryEmit(ChatEvent.Call(CallSignalEvent.Answer(cid, it, sdp))) }
-                }
-            }
-            ContentKind.CALL_ICE -> {
-                val cid = conversationIdFor(envelope, content)
-                content.callId?.let {
-                    _events.tryEmit(
-                        ChatEvent.Call(
-                            CallSignalEvent.Ice(cid, it, content.candidate.orEmpty(), content.sdpMid, content.sdpMLineIndex),
-                        ),
+            ContentKind.CALL_OFFER -> emitCallSignal(envelope, content) { cid, callId, sentAt ->
+                content.sdp?.let {
+                    CallSignalEvent.Offer(
+                        conversationId = cid,
+                        fromNexId = senderNexId,
+                        fromSignalDeviceId = envelope.senderSignalDeviceId,
+                        callId = callId,
+                        sentAt = sentAt,
+                        displayName = content.senderDisplayName,
+                        sdp = it,
                     )
                 }
             }
-            ContentKind.CALL_HANGUP -> {
-                content.callId?.let {
-                    _events.tryEmit(ChatEvent.Call(CallSignalEvent.Ended(conversationIdFor(envelope, content), it, content.callEndReason)))
+            ContentKind.CALL_ANSWER -> emitCallSignal(envelope, content) { cid, callId, sentAt ->
+                content.sdp?.let {
+                    CallSignalEvent.Answer(
+                        cid,
+                        senderNexId,
+                        envelope.senderSignalDeviceId,
+                        callId,
+                        sentAt,
+                        it,
+                    )
                 }
             }
-            ContentKind.CALL_REJECT -> {
-                content.callId?.let {
-                    _events.tryEmit(ChatEvent.Call(CallSignalEvent.Rejected(conversationIdFor(envelope, content), it)))
-                }
+            ContentKind.CALL_ICE -> emitCallSignal(envelope, content) { cid, callId, sentAt ->
+                CallSignalEvent.Ice(
+                    cid,
+                    senderNexId,
+                    envelope.senderSignalDeviceId,
+                    callId,
+                    sentAt,
+                    content.candidate.orEmpty(),
+                    content.sdpMid,
+                    content.sdpMLineIndex,
+                )
+            }
+            ContentKind.CALL_HANGUP -> emitCallSignal(envelope, content) { cid, callId, sentAt ->
+                CallSignalEvent.Ended(
+                    cid,
+                    senderNexId,
+                    envelope.senderSignalDeviceId,
+                    callId,
+                    sentAt,
+                    content.callEndReason,
+                )
+            }
+            ContentKind.CALL_REJECT -> emitCallSignal(envelope, content) { cid, callId, sentAt ->
+                CallSignalEvent.Rejected(
+                    cid,
+                    senderNexId,
+                    envelope.senderSignalDeviceId,
+                    callId,
+                    sentAt,
+                    content.callEndReason,
+                )
             }
         }
+    }
+
+    private suspend fun emitCallSignal(
+        envelope: EnvelopeDto,
+        content: SecureContent,
+        build: (conversationId: String, callId: String, sentAt: Long) -> CallSignalEvent?,
+    ) {
+        // Calls are one-to-one. A group id on a call signal is never valid and
+        // must not be allowed to pop an incoming-call screen for a group.
+        if (content.groupId != null) return
+        val senderNexId = envelope.senderNexId
+        if (contactDao.get(senderNexId)?.blocked == true) return
+        val callId = content.callId?.takeIf { it.isNotBlank() } ?: return
+        val event = build(conversationIdFor(envelope), callId, content.timestamp) ?: return
+        _events.tryEmit(ChatEvent.Call(event))
+    }
+
+    suspend fun isBlocked(nexId: String): Boolean = withContext(Dispatchers.IO) {
+        contactDao.get(nexId)?.blocked == true
+    }
+
+    /**
+     * Persists a finished call in the encrypted history table and inserts a
+     * lightweight CALL row into the conversation timeline.
+     */
+    suspend fun recordCall(
+        call: CallHistoryEntity,
+        conversationId: String,
+        body: String,
+    ) = withContext(Dispatchers.IO) {
+        callHistoryDao.upsert(call)
+        val profile = profileDao.get() ?: return@withContext
+        val conversation = conversationDao.get(conversationId) ?: return@withContext
+        val endedAt = call.endedAt ?: System.currentTimeMillis()
+        val message = MessageEntity(
+            id = "call:${call.id}",
+            conversationId = conversationId,
+            senderNexId = if (call.outgoing) profile.nexId else call.peerNexId,
+            senderDisplayName = if (call.outgoing) profile.displayName else call.peerName,
+            outgoing = call.outgoing,
+            body = body,
+            kind = MessageKind.CALL,
+            status = MessageStatus.SENT,
+            sentAt = endedAt,
+            receivedAt = endedAt,
+        )
+        if (messageDao.insertIgnore(message) == -1L) return@withContext
+        conversationDao.touch(conversationId, body, endedAt)
     }
 
     private suspend fun handleIncomingText(envelope: EnvelopeDto, content: SecureContent, senderNexId: String) {
@@ -598,15 +727,15 @@ class ChatRepository(
         )
     }
 
-    private fun conversationIdFor(envelope: EnvelopeDto, content: SecureContent): String =
-        if (content.groupId != null) "group:${content.groupId}" else "dm:${content.senderNexId ?: envelope.senderNexId}"
+    private fun conversationIdFor(envelope: EnvelopeDto): String =
+        envelope.groupId?.let { "group:$it" } ?: "dm:${envelope.senderNexId}"
 
-    private suspend fun handleReaction(content: SecureContent) {
+    private suspend fun handleReaction(content: SecureContent, senderNexId: String) {
         val target = content.targetClientId ?: return
         val emoji = content.emoji ?: return
         val existing = messageDao.get(target) ?: return
         val map = parseReactions(existing.reactionsJson).toMutableMap()
-        val from = content.senderNexId ?: return
+        val from = senderNexId
         map.keys.toList().forEach { key ->
             val updated = map[key].orEmpty().filterNot { it == from }
             if (updated.isEmpty()) map.remove(key) else map[key] = updated
@@ -863,8 +992,34 @@ class ChatRepository(
             }
             val self = profileDao.get()?.nexId
             val targets = mutableListOf<Target>()
+            val unavailable = mutableListOf<String>()
             for (member in members.filter { it.nexId != self }) {
-                targets += resolveTargets(member.nexId)
+                try {
+                    targets += resolveTargets(member.nexId)
+                } catch (error: IdentityChangedException) {
+                    // An identity change is a security event, not an offline
+                    // member. Never silently skip it.
+                    throw error
+                } catch (error: ApiException) {
+                    if (!error.isUnavailableRecipient()) throw error
+                    unavailable += member.displayName.ifBlank { member.nexId }
+                }
+            }
+            if (targets.isEmpty() && unavailable.isNotEmpty()) {
+                throw ApiException(
+                    0,
+                    "NO_ACTIVE_DEVICE",
+                    "No group member currently has an active encryption device. Ask them to sign in and open NEXCHAT.",
+                )
+            }
+            if (unavailable.isNotEmpty()) {
+                _events.tryEmit(
+                    ChatEvent.Warning(
+                        conversation.id,
+                        "Sent to available members. ${unavailable.distinct().joinToString(", ")} " +
+                            "currently ${if (unavailable.size == 1) "has" else "have"} no active encryption device.",
+                    ),
+                )
             }
             targets.distinctBy { it.nexId to it.signalDeviceId }
         } else {
@@ -873,6 +1028,13 @@ class ChatRepository(
         }
     }
 
+    private fun ApiException.isUnavailableRecipient(): Boolean =
+        code == "NO_ACTIVE_DEVICES" ||
+            code == "NO_ACTIVE_DEVICE" ||
+            code == "NO_KEY_BUNDLE" ||
+            code == "PREKEYS_EXHAUSTED" ||
+            code == "USER_NOT_FOUND"
+
     private suspend fun resolveTargets(nexId: String): List<Target> {
         val known = crypto.knownDeviceIds(nexId).toSet()
         // Always discover the current device set. A contact can add or replace a
@@ -880,16 +1042,27 @@ class ChatRepository(
         // to an old, unreachable device forever.
         val current = try {
             currentDevices(nexId)
-        } catch (error: Exception) {
-            if (known.isNotEmpty()) {
+        } catch (error: ApiException) {
+            if (known.isNotEmpty() && error.isTransient()) {
                 // Offline fallback: established sessions still work without a
-                // device-list refresh. New devices are picked up on reconnect.
+                // device-list refresh. A deleted account or revoked session must
+                // not be masked by an old ratchet.
                 return known.map { Target(nexId, it, null) }
             }
             throw error
+        } catch (error: Exception) {
+            if (known.isNotEmpty()) return known.map { Target(nexId, it, null) }
+            throw error
         }
         if (current.isEmpty()) {
-            throw ApiException(0, "NO_KEY_BUNDLE", "This contact has no active encryption keys. Ask them to open NEXCHAT.")
+            // HTTP 200 with zero active devices means the account exists but no
+            // installation is currently signed in. This is different from an
+            // empty prekey pool, so use a distinct code and message.
+            throw ApiException(
+                0,
+                "NO_ACTIVE_DEVICE",
+                "This contact is signed out or has not finished setting up NEXCHAT. Ask them to sign in and open the app.",
+            )
         }
 
         val targets = mutableListOf<Target>()
@@ -914,22 +1087,34 @@ class ChatRepository(
             }
         }
         if (targets.isEmpty()) {
-            throw ApiException(0, "NO_KEY_BUNDLE", "This contact has no usable encryption keys. Ask them to open NEXCHAT.")
+            throw ApiException(
+                0,
+                "PREKEYS_EXHAUSTED",
+                "This contact has no usable encryption keys. Ask them to reopen NEXCHAT so fresh keys are published.",
+            )
         }
         return targets.distinctBy { it.signalDeviceId }
     }
+
+    private fun ApiException.isTransient(): Boolean =
+        statusCode == 0 || statusCode == 408 || statusCode == 429 || statusCode >= 500
 
     private suspend fun currentDevices(nexId: String): List<KeyDeviceDto> {
         val now = System.currentTimeMillis()
         deviceCacheMutex.withLock {
             deviceCache[nexId]?.let { (cachedAt, devices) ->
-                if (now - cachedAt < DEVICE_CACHE_MILLIS) return devices
+                // Never cache an empty list: the contact may have just signed in,
+                // and a cached empty response would keep failing for a full minute.
+                if (devices.isNotEmpty() && now - cachedAt < DEVICE_CACHE_MILLIS) return devices
             }
         }
         val response = api.getKeyDevices(nexId)
         // Keep the server order but remove duplicate signal device IDs.
         val devices = response.devices.distinctBy { it.signalDeviceId }
-        deviceCacheMutex.withLock { deviceCache[nexId] = now to devices }
+        deviceCacheMutex.withLock {
+            if (devices.isEmpty()) deviceCache.remove(nexId)
+            else deviceCache[nexId] = now to devices
+        }
         return devices
     }
 
@@ -1031,6 +1216,17 @@ class ChatRepository(
                 }
             }
         }
+    }
+
+    /**
+     * Called on startup and while connected. Repairs the published prekey set
+     * if a previous session exhausted its one-time keys or the device row no
+     * longer points at a usable Kyber key.
+     */
+    suspend fun ensurePublishedKeys() = withContext(Dispatchers.IO) {
+        crypto.ensureInitialized()
+        runCatching { replenishPreKeysIfNeeded() }
+        Unit
     }
 
     private suspend fun replenishPreKeysIfNeeded() = withContext(Dispatchers.IO) {
@@ -1140,6 +1336,10 @@ class ChatRepository(
     private fun friendlyError(error: Exception): String = when {
         error is ApiException && error.code == "PREKEYS_EXHAUSTED" ->
             "This contact has not published encryption keys. Ask them to reopen NEXCHAT."
+        error is ApiException && (error.code == "NO_ACTIVE_DEVICE" || error.code == "NO_ACTIVE_DEVICES") ->
+            "This contact is signed out or has not finished setting up NEXCHAT. Ask them to sign in and open the app."
+        error is ApiException && error.code == "NO_KEY_BUNDLE" ->
+            "This contact has no usable encryption keys yet. Ask them to reopen NEXCHAT."
         error is ApiException && error.code == "RECIPIENT_NOT_FOUND" -> "This account no longer exists"
         error is IdentityChangedException ->
             "Safety number changed. Verify it, then reset the security session from the contact screen."
@@ -1150,6 +1350,8 @@ class ChatRepository(
         "RECIPIENT_NOT_FOUND" -> "The recipient account no longer exists"
         "DEVICE_NOT_ACTIVE" -> "The recipient device is no longer active"
         "PREKEYS_EXHAUSTED" -> "The recipient must reopen NEXCHAT to replenish encryption keys"
+        "NO_ACTIVE_DEVICE", "NO_ACTIVE_DEVICES" -> "The recipient is signed out or has not finished setting up NEXCHAT"
+        "NO_KEY_BUNDLE" -> "The recipient has no usable encryption keys yet"
         "NOT_A_GROUP_MEMBER" -> "You are no longer a member of this group"
         "RECIPIENT_NOT_IN_GROUP" -> "The recipient is no longer in this group"
         "EPHEMERAL_TARGET_OFFLINE" -> "The recipient is offline"

@@ -234,6 +234,22 @@ describe("prekey distribution", () => {
     assert.equal(rotatedBundle?.oneTimePreKeyId, 50);
   });
 
+  it("advertises one-to-one WebRTC audio calling", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/config",
+    });
+
+    assert.equal(response.statusCode, 200);
+    const body = response.json() as {
+      iceServers: unknown[];
+      features: { audioCalls: string; pushNotifications: boolean };
+    };
+    assert.equal(body.features.audioCalls, "webrtc-audio-1to1");
+    assert.equal(body.features.pushNotifications, false);
+    assert.ok(Array.isArray(body.iceServers));
+  });
+
   it("rejects a malformed device filter", async () => {
     const response = await app.inject({
       method: "GET",

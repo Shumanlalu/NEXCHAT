@@ -1,5 +1,9 @@
 package com.nexchat.app.ui.screens
 
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -70,6 +74,7 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -78,11 +83,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.paging.compose.collectAsLazyPagingItems
 import androidx.paging.compose.itemKey
+import com.nexchat.app.NexChatApp
 import com.nexchat.app.core.db.ConversationEntity
 import com.nexchat.app.core.db.MessageEntity
+import com.nexchat.app.core.db.MessageKind
 import com.nexchat.app.core.db.MessageStatus
 import com.nexchat.app.ui.components.Avatar
 import com.nexchat.app.ui.components.ConfirmDialog
@@ -106,6 +114,8 @@ fun ChatScreen(
     onOpenGroup: (String) -> Unit,
 ) {
     val palette = LocalNexPalette.current
+    val context = LocalContext.current
+    val container = remember(context) { NexChatApp.from(context).container }
     val vm = nexViewModel(key = conversationId) { ChatViewModel(it.chat, it.contacts, conversationId) }
     val conversation by vm.conversation.collectAsStateWithLifecycle()
     val input by vm.input.collectAsStateWithLifecycle()
@@ -123,6 +133,7 @@ fun ChatScreen(
     var editTarget by remember { mutableStateOf<MessageEntity?>(null) }
     var confirmClear by remember { mutableStateOf(false) }
     var confirmDeleteAll by remember { mutableStateOf<MessageEntity?>(null) }
+    var pendingCall by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         vm.errors.collect { snackbar.showSnackbar(it) }
@@ -136,6 +147,61 @@ fun ChatScreen(
         else -> "end-to-end encrypted"
     }
 
+    fun beginVoiceCall() {
+        val target = conv
+        val peer = target?.peerNexId
+        if (target?.type != "DM" || peer.isNullOrBlank()) {
+            scope.launch {
+                snackbar.showSnackbar("Voice calls are available only in one-to-one chats.")
+            }
+            return
+        }
+        if (blocked) {
+            scope.launch { snackbar.showSnackbar("Unblock this contact to call them.") }
+            return
+        }
+        runCatching {
+            container.call.startOutgoing(target.id, peer, target.title, target.avatar)
+        }.onFailure { error ->
+            scope.launch {
+                snackbar.showSnackbar(error.message ?: "The call could not be started")
+            }
+        }
+    }
+
+    val callPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        val startAfterGrant = pendingCall
+        pendingCall = false
+        if (granted && startAfterGrant) {
+            beginVoiceCall()
+        } else if (!granted) {
+            scope.launch {
+                snackbar.showSnackbar("Microphone permission is required for voice calls.")
+            }
+        }
+    }
+
+    fun requestVoiceCall() {
+        if (conv?.type != "DM" || blocked) {
+            scope.launch {
+                snackbar.showSnackbar("Voice calls are available only in one-to-one chats.")
+            }
+            return
+        }
+        val granted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.RECORD_AUDIO,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            beginVoiceCall()
+        } else {
+            pendingCall = true
+            callPermission.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
     Box(Modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
             ChatHeader(
@@ -145,7 +211,8 @@ fun ChatScreen(
                 isGroup = conv?.type == "GROUP",
                 online = online,
                 onBack = onBack,
-                onCall = { scope.launch { snackbar.showSnackbar("Voice calls are not available in this build.") } },
+                onCall = { requestVoiceCall() },
+                callEnabled = conv?.type == "DM" && !blocked,
                 onInfo = {
                     val target = conv
                     if (target?.type == "GROUP") {
@@ -529,6 +596,7 @@ private fun ChatHeader(
     online: Boolean,
     onBack: () -> Unit,
     onCall: () -> Unit,
+    callEnabled: Boolean,
     onInfo: () -> Unit,
     onMore: () -> Unit,
 ) {
@@ -573,7 +641,13 @@ private fun ChatHeader(
                 )
             }
         }
-        GlassIconButton(Icons.Outlined.Call, contentDescription = "Call", onClick = onCall, size = 40.dp)
+        GlassIconButton(
+            Icons.Outlined.Call,
+            contentDescription = "Call",
+            onClick = onCall,
+            size = 40.dp,
+            enabled = callEnabled,
+        )
         Spacer(Modifier.width(6.dp))
         GlassIconButton(Icons.Outlined.MoreVert, contentDescription = "More", onClick = onMore, size = 40.dp)
     }
@@ -660,6 +734,21 @@ private fun MessageBubble(
                     style = MaterialTheme.typography.bodyMedium.copy(fontStyle = FontStyle.Italic),
                     color = secondary,
                 )
+            } else if (message.kind == MessageKind.CALL) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Outlined.Call,
+                        contentDescription = null,
+                        tint = textColor,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(Modifier.width(7.dp))
+                    Text(
+                        message.body,
+                        style = MaterialTheme.typography.bodyLarge.copy(fontSize = 15.sp, lineHeight = 21.sp),
+                        color = textColor,
+                    )
+                }
             } else {
                 Text(
                     message.body,
