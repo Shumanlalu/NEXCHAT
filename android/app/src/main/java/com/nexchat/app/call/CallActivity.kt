@@ -98,9 +98,9 @@ class CallActivity : ComponentActivity() {
                     onToggleSpeaker = container.call::toggleSpeaker,
                 )
                 LaunchedEffect(call) {
-                    if (call == null || call?.status == CallStatus.ENDED && call?.endReason == null) {
-                        finish()
-                    }
+                    // The manager keeps the ended state briefly so the user can
+                    // see why the call stopped; once it is cleared, close.
+                    if (call == null) finish()
                 }
             }
         }
@@ -110,6 +110,19 @@ class CallActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         consumeIntent(intent)
+    }
+
+    override fun onDestroy() {
+        // If the user dismisses the ended-call screen, drop the stale state so
+        // the next call can start immediately.
+        if (isFinishing) {
+            runCatching {
+                val container = NexChatApp.from(this).container
+                val call = container.call.state.value
+                if (call?.status == CallStatus.ENDED) container.call.clearEnded(call.callId)
+            }
+        }
+        super.onDestroy()
     }
 
     private fun consumeIntent(intent: Intent?) {

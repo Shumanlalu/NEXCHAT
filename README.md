@@ -20,15 +20,21 @@ numbers, and per-device sessions.
 | Online one-to-one messaging | Implemented with per-device Signal sessions |
 | Private groups | Implemented as pairwise encrypted fan-out to every member device |
 | Encrypted local storage | SQLCipher; key protected with Android Keystore AES-GCM |
-| Message states | Pending, sent, delivered, read, failed; queued in an encrypted outbox |
-| Reliability | Retry loop, reusable last-resort Kyber prekeys, optional one-time prekeys, device-list refresh, duplicate-envelope detection, 20-second queued-message polling fallback |
+| Message states | Pending, sent, delivered, read, failed; one online delivery attempt, then marked failed if the relay is unreachable |
+| Reliability | Online-only sending with no local retry, reusable last-resort Kyber prekeys, optional one-time prekeys, device-list refresh, duplicate-envelope detection, 5-second queued-message polling fallback |
 | Identity verification | Per-device numeric safety numbers, contact-level verification marker, proactive identity-change detection, manual session reset from the contact screen |
 | Attachments | Not implemented in this build; avatar uploads are re-encoded to strip EXIF/GPS metadata |
-| Voice calls | One-to-one WebRTC audio; SDP and ICE travel inside Signal envelopes. Video is not implemented |
+| Voice calls | One-to-one WebRTC audio with 1.5-second call-signal polling; SDP and ICE travel inside Signal envelopes. Video is not implemented |
 | Bluetooth LE nearby messaging | Not implemented in this build |
 | Offline voice-note transcription | Not implemented; there is no audio recording or attachment pipeline |
 | QR device linking | Not implemented; sign in separately on each device |
 | Push notifications | Not implemented; a foreground WebSocket service keeps the connection alive |
+
+Sending is online-only. Each message gets one immediate delivery attempt. If the
+relay cannot be reached, the local outbox rows are deleted, the message is marked
+**failed**, and nothing is retried in the background. Ciphertext already accepted
+by the relay remains in the encrypted server queue, so a recipient who reconnects
+later still fetches it through the polling fallback.
 
 ## Security model
 
@@ -212,10 +218,12 @@ only to the HTTPS server baked into that build.
 - No Android emulator or physical device is available in this workspace, so the
   APK has not been runtime-tested. Build success is not the same as device
   verification.
-- Online messaging needs either the WebSocket or the 20-second queue poll, so
+- Online messaging needs either the WebSocket or the 5-second queue poll, so
   the app process or foreground service must be running. There is no
   push-notification service; aggressive battery optimizations can delay
-  messages until the app is opened again.
+  messages until the app is opened again. If a send attempt fails, NEXCHAT does
+  not retry it automatically; the message is marked failed and can be sent again
+  by the user.
 - On the Vercel deployment, realtime presence and delivery-receipt pushes are
   best-effort because a socket may be held by a different function instance from
   the HTTP request. Queued ciphertext is still fetched by polling; treat the
@@ -225,10 +233,12 @@ only to the HTTPS server baked into that build.
   the UI. There is no WebGL/3D renderer; the silver interface is drawn natively
   with Jetpack Compose.
 - Voice calls are one-to-one audio only; there is no video, group calling, or
-  call recording. Like messages, incoming calls require the app process or
-  foreground service to be connected. Without push notifications, a killed app
-  cannot receive a call. Incoming-call alerts also depend on notification and
-  full-screen-intent permission on newer Android versions.
+  call recording. Both people must have the app process or foreground service
+  connected. Without push notifications, a killed app cannot receive a call.
+  Incoming-call alerts also depend on notification and full-screen-intent
+  permission on newer Android versions. While a call is active, NEXCHAT polls
+  the encrypted queue every 1.5 seconds; the normal receive poll runs every 5
+  seconds.
 - The default deployment configures public Google STUN servers but no TURN
   relay. Calls between peers behind restrictive or symmetric NATs can therefore
   fail to connect until the operator sets `ICE_SERVERS_JSON` to include a TURN

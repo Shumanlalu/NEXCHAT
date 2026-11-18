@@ -70,11 +70,13 @@ class WebSocketManager(
     fun start() {
         if (!running.compareAndSet(false, true)) return
         // The relay may serve sockets from more than one instance. Poll as a
-        // delivery fallback so a missed push never strands ciphertext.
+        // delivery fallback so a missed push never strands ciphertext. A short
+        // interval matters for calls: an offer that waits 20 seconds feels
+        // broken even though it eventually rings.
         poller = scope.launch {
             while (isActive && running.get()) {
                 runCatching { chat.pollPending() }
-                delay(20_000L)
+                delay(POLL_INTERVAL_MILLIS)
             }
         }
         registerNetworkCallback()
@@ -238,5 +240,9 @@ class WebSocketManager(
             closed.complete(Unit)
             closed
         }
+    }
+
+    private companion object {
+        const val POLL_INTERVAL_MILLIS = 5_000L
     }
 }

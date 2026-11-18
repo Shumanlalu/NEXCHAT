@@ -30,9 +30,14 @@ import com.nexchat.app.core.network.KeyDeviceDto
 import com.nexchat.app.core.network.OutgoingEnvelope
 import com.nexchat.app.core.network.PreKeyDto
 import com.nexchat.app.core.network.RotateKeysRequest
+import com.nexchat.app.core.network.SessionExpiredException
 import com.nexchat.app.core.settings.SettingsStore
+import java.io.IOException
+import java.time.Instant
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -135,6 +140,8 @@ class ChatRepository(
     private val sendMutex = Mutex()
     private val receiveMutex = Mutex()
     private val replenishMutex = Mutex()
+    @Volatile private var lastPreKeyCheckAt = 0L
+    @Volatile private var staleOutboxCleared = false
     private val deviceCacheMutex = Mutex()
     private val deviceCache = mutableMapOf<String, Pair<Long, List<KeyDeviceDto>>>()
     private val _events = MutableSharedFlow<ChatEvent>(extraBufferCapacity = 128)
@@ -339,17 +346,21 @@ class ChatRepository(
             if (durable) sendControl(conversation, filled) else runCatching { sendEphemeral(conversation, filled) }
         }
 
+    /**
+     * NEXCHAT sends online only: every queued envelope gets exactly one delivery
+     * attempt. If the relay cannot be reached, the local rows are deleted and
+     * the message is marked failed instead of being retried in the background.
+     * The encrypted server queue is untouched, so a recipient who was already
+     * online still receives accepted ciphertext.
+     */
     suspend fun flushOutbox(): Boolean = withContext(Dispatchers.IO) {
-        if (!sendMutex.tryLock()) return@withContext false
-        try {
+        // Wait for another send instead of skipping this one. A skipped flush
+        // would leave ciphertext in the outbox with no retry to pick it up.
+        sendMutex.withLock {
             val pending = outboxDao.due(System.currentTimeMillis(), 100)
-            if (pending.isEmpty()) return@withContext true
-            val rows = pending.filter { it.attempts < 8 }
-            if (rows.isEmpty()) {
-                failExhausted()
-                return@withContext false
-            }
-            val outgoing = rows.map {
+            if (pending.isEmpty()) return@withLock true
+            val now = System.currentTimeMillis()
+            val outgoing = pending.map {
                 OutgoingEnvelope(
                     recipientNexId = it.recipientNexId,
                     recipientSignalDeviceId = it.recipientSignalDeviceId,
@@ -357,18 +368,20 @@ class ChatRepository(
                     ciphertext = it.ciphertext,
                     cipherType = it.cipherType,
                     ephemeral = it.ephemeral,
+                    expiresInSeconds = (((it.expiresAt - now) / 1000L)
+                        .coerceIn(10L, MAX_ENVELOPE_TTL_SECONDS)).toInt(),
                     groupId = it.groupId,
                 )
             }
             val response = try {
                 api.sendEnvelopes(outgoing)
-            } catch (error: Exception) {
-                rows.forEach { outboxDao.markAttempt(it.id, System.currentTimeMillis()) }
-                if (error is ApiException && error.code == "SESSION_EXPIRED") throw error
-                return@withContext false
+            } catch (error: Throwable) {
+                withContext(NonCancellable) { discardOutbox(pending, error) }
+                if (error is CancellationException || error is SessionExpiredException) throw error
+                throw ApiException(0, "SEND_FAILED_ONLINE_ONLY", sendFailureMessage(error))
             }
             for (accepted in response.accepted) {
-                val row = rows.firstOrNull {
+                val row = pending.firstOrNull {
                     it.clientId == accepted.clientId &&
                         it.recipientSignalDeviceId == accepted.recipientSignalDeviceId
                 }
@@ -381,6 +394,7 @@ class ChatRepository(
                     messageDao.markSent(accepted.clientId)
                 }
             }
+            var rejected: ApiException? = null
             if (response.skipped.isNotEmpty()) {
                 val acceptedClients = response.accepted.map { it.clientId }.toSet()
                 for (skipped in response.skipped.distinctBy { it.clientId }) {
@@ -394,29 +408,74 @@ class ChatRepository(
                     outboxDao.deleteForClient(skipped.clientId)
                     messageDao.updateStatus(skipped.clientId, MessageStatus.FAILED, System.currentTimeMillis())
                     messageDao.setError(skipped.clientId, skipReason(skipped.reason))
+                    if (rejected == null) {
+                        rejected = ApiException(0, skipped.reason, skipReason(skipped.reason))
+                    }
                 }
             }
-            failExhausted()
+            // Every row must be confirmed by the relay. If a response omitted
+            // one, treat it as failed rather than leaving it for a later retry.
+            val acceptedKeys = response.accepted
+                .map { it.clientId to it.recipientSignalDeviceId }
+                .toSet()
+            val skippedClients = response.skipped.map { it.clientId }.toSet()
+            val unconfirmed = pending.filter {
+                it.clientId !in skippedClients &&
+                    (it.clientId to it.recipientSignalDeviceId) !in acceptedKeys
+            }
+            if (unconfirmed.isNotEmpty()) {
+                discardOutbox(unconfirmed, null)
+            }
+            rejected?.let { throw it }
             true
-        } finally {
-            sendMutex.unlock()
         }
     }
 
-    private suspend fun failExhausted() {
-        val due = outboxDao.due(System.currentTimeMillis(), 200)
-        for (item in due.filter { it.attempts >= 8 }) {
-            outboxDao.delete(item.id)
-            if (outboxDao.countForClient(item.clientId) == 0) {
-                messageDao.updateStatus(item.clientId, MessageStatus.FAILED, System.currentTimeMillis())
-                messageDao.setError(item.clientId, "The message could not be delivered after several attempts")
+    /**
+     * Clears local outbox rows left behind by an older build, a crash, or a
+     * killed process. Online-only sending never resumes a send automatically.
+     */
+    suspend fun abandonQueuedSends() = withContext(Dispatchers.IO) {
+        if (staleOutboxCleared) return@withContext
+        sendMutex.withLock {
+            if (staleOutboxCleared) return@withLock
+            // Only old rows are crash leftovers. A row enqueued by a send that
+            // is still starting must never be mistaken for one.
+            val pending = outboxDao.due(
+                System.currentTimeMillis() - STALE_OUTBOX_MILLIS,
+                500,
+            )
+            if (pending.isNotEmpty()) discardOutbox(pending, null)
+            staleOutboxCleared = true
+        }
+    }
+
+    private suspend fun discardOutbox(rows: List<OutboxEntity>, error: Throwable?) {
+        for (row in rows) {
+            outboxDao.delete(row.id)
+        }
+        val now = System.currentTimeMillis()
+        val message = sendFailureMessage(error)
+        for (clientId in rows.map { it.clientId }.distinct()) {
+            if (outboxDao.countForClient(clientId) == 0) {
+                messageDao.updateStatus(clientId, MessageStatus.FAILED, now)
+                messageDao.setError(clientId, message)
             }
         }
+    }
+
+    private fun sendFailureMessage(error: Throwable?): String = when {
+        error is SessionExpiredException -> error.message ?: "Your session expired. Sign in again."
+        error is ApiException && error.code == "EPHEMERAL_TARGET_OFFLINE" ->
+            "The recipient is offline. NEXCHAT only delivers while both of you are online."
+        error is ApiException -> error.message ?: "The server rejected the message"
+        error is IOException -> "You appear to be offline. Connect to the internet and send again."
+        else -> "The message could not be sent. Check your connection and try again."
     }
 
     suspend fun onConnected() = withContext(Dispatchers.IO) {
         runCatching { syncGroups() }
-        flushOutbox()
+        runCatching { abandonQueuedSends() }
         runCatching { receivePending() }
         runCatching { replenishPreKeysIfNeeded() }
     }
@@ -428,10 +487,18 @@ class ChatRepository(
      */
     suspend fun pollPending() = withContext(Dispatchers.IO) {
         runCatching { receivePending() }
-        runCatching { flushOutbox() }
         // Replenish even while the socket stays open. A recipient that remains
         // connected would otherwise never publish new one-time prekeys.
         runCatching { replenishPreKeysIfNeeded() }
+    }
+
+    /**
+     * Fetch queued ciphertext without syncing anything else. Call signaling
+     * uses this at a short interval because a serverless relay may not push a
+     * WebSocket event to the function instance that holds the recipient socket.
+     */
+    suspend fun pollIncoming() = withContext(Dispatchers.IO) {
+        receivePending()
     }
 
     /**
@@ -609,8 +676,15 @@ class ChatRepository(
         val senderNexId = envelope.senderNexId
         if (contactDao.get(senderNexId)?.blocked == true) return
         val callId = content.callId?.takeIf { it.isNotBlank() } ?: return
-        val event = build(conversationIdFor(envelope), callId, content.timestamp) ?: return
-        _events.tryEmit(ChatEvent.Call(event))
+        // Use the relay timestamp so an expired queued offer is not revived by
+        // a skewed or malicious sender clock.
+        val sentAt = runCatching { Instant.parse(envelope.createdAt).toEpochMilli() }
+            .getOrDefault(content.timestamp)
+        val event = build(conversationIdFor(envelope), callId, sentAt) ?: return
+        // Call signals are latency-sensitive and must not be dropped when the
+        // event buffer is busy. This collector is always active while the app
+        // process is alive, so suspending here is safe.
+        _events.emit(ChatEvent.Call(event))
     }
 
     suspend fun isBlocked(nexId: String): Boolean = withContext(Dispatchers.IO) {
@@ -1125,6 +1199,17 @@ class ChatRepository(
     private suspend fun enqueue(conversation: ConversationEntity, content: SecureContent, targets: List<Target>) {
         val encrypted = mutableListOf<OutboxEntity>()
         val now = System.currentTimeMillis()
+        // A call signal is only useful while the call is ringing. Do not let a
+        // queued offer or ICE candidate survive for days on the relay.
+        val ttlMillis = when (content.kind) {
+            ContentKind.CALL_OFFER,
+            ContentKind.CALL_ANSWER,
+            ContentKind.CALL_ICE,
+            ContentKind.CALL_HANGUP,
+            ContentKind.CALL_REJECT,
+            -> CALL_SIGNAL_TTL_MILLIS
+            else -> MESSAGE_TTL_MILLIS
+        }
         for (target in targets) {
             val payload = crypto.encrypt(content, target.nexId, target.signalDeviceId, target.bundle)
             encrypted += OutboxEntity(
@@ -1138,7 +1223,7 @@ class ChatRepository(
                 ciphertext = payload.ciphertext,
                 ephemeral = false,
                 createdAt = now,
-                expiresAt = now + 7L * 24 * 3600 * 1000,
+                expiresAt = now + ttlMillis,
             )
         }
         encrypted.forEach { outboxDao.upsert(it) }
@@ -1230,8 +1315,11 @@ class ChatRepository(
     }
 
     private suspend fun replenishPreKeysIfNeeded() = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        if (now - lastPreKeyCheckAt < PRE_KEY_CHECK_INTERVAL_MILLIS) return@withContext
         if (!replenishMutex.tryLock()) return@withContext
         try {
+            lastPreKeyCheckAt = System.currentTimeMillis()
             val count = api.preKeyCount()
             if (count.oneTimePreKeys >= 10 && count.kyberPreKeys >= 1) return@withContext
             val batch = crypto.newUploadBatch()
@@ -1375,3 +1463,8 @@ private val reactionsSerializer = MapSerializer(
 )
 
 private const val DEVICE_CACHE_MILLIS = 60_000L
+private const val PRE_KEY_CHECK_INTERVAL_MILLIS = 60_000L
+private const val STALE_OUTBOX_MILLIS = 60_000L
+private const val MAX_ENVELOPE_TTL_SECONDS = 7L * 24 * 3600
+private const val MESSAGE_TTL_MILLIS = MAX_ENVELOPE_TTL_SECONDS * 1000L
+private const val CALL_SIGNAL_TTL_MILLIS = 3L * 60 * 1000

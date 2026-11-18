@@ -20,6 +20,7 @@ import com.nexchat.app.service.NotificationHelper
 import java.util.UUID
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -27,6 +28,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -96,6 +98,7 @@ class CallManager(
     private var ringJob: Job? = null
     private var connectJob: Job? = null
     private var disconnectJob: Job? = null
+    private var signalPollJob: Job? = null
     private val remoteCandidates =
         mutableMapOf<String, MutableList<Pair<Int, IceCandidate>>>()
     private val recentCalls = LinkedHashSet<String>()
@@ -135,6 +138,7 @@ class CallManager(
             _state.value = call
         }
         notifications.cancelIncomingCall()
+        startSignalPolling()
         configureAudio()
         launchCallActivity(call.callId, autoAccept = false)
         scope.launch { sendOffer(call) }
@@ -200,7 +204,12 @@ class CallManager(
 
     fun hangup() {
         val call = _state.value ?: return
-        if (call.status == CallStatus.ENDED) return
+        if (call.status == CallStatus.ENDED) {
+            // Close/Back on the ended screen must dismiss it immediately
+            // instead of waiting for the automatic clear delay.
+            clearEnded(call.callId)
+            return
+        }
         val connected = call.connectedAt != null
         val tag = when {
             connected -> "completed"
@@ -251,6 +260,31 @@ class CallManager(
                 _state.value = null
             }
         }
+        if (_state.value == null) stopSignalPolling()
+    }
+
+    /**
+     * Serverless relays may deliver a WebSocket push on a different function
+     * instance than the one holding this socket. While a call exists, poll the
+     * encrypted queue quickly so signaling does not wait for the slower
+     * background receive poll.
+     */
+    private fun startSignalPolling() {
+        if (signalPollJob?.isActive == true) return
+        signalPollJob = scope.launch {
+            while (isActive) {
+                delay(CALL_SIGNAL_POLL_MILLIS)
+                val current = _state.value
+                if (current == null || current.status == CallStatus.ENDED) break
+                runCatching { chat.pollIncoming() }
+            }
+            signalPollJob = null
+        }
+    }
+
+    private fun stopSignalPolling() {
+        signalPollJob?.cancel()
+        signalPollJob = null
     }
 
     fun onSignal(event: CallSignalEvent) {
@@ -284,7 +318,8 @@ class CallManager(
                 durable = true,
             )
             startRingTimeout(call.callId)
-        } catch (error: Exception) {
+        } catch (error: Throwable) {
+            if (error is CancellationException) throw error
             failCall(call.callId, error.message ?: "Could not start the call")
         }
     }
@@ -313,7 +348,8 @@ class CallManager(
                 durable = true,
             )
             startConnectTimeout(call.callId)
-        } catch (error: Exception) {
+        } catch (error: Throwable) {
+            if (error is CancellationException) throw error
             failCall(call.callId, error.message ?: "Could not answer the call")
         }
     }
@@ -359,6 +395,7 @@ class CallManager(
             remoteCandidates[event.callId] = remoteCandidates[event.callId] ?: mutableListOf()
             _state.value = call
         }
+        startSignalPolling()
         notifications.showIncomingCall(call.callId, call.peerName)
         launchCallActivity(call.callId, autoAccept = false)
         startIncomingRingTimeout(call.callId)
@@ -389,7 +426,8 @@ class CallManager(
                 }
                 flushRemoteCandidates(event.callId)
                 startConnectTimeout(event.callId)
-            } catch (error: Exception) {
+            } catch (error: Throwable) {
+                if (error is CancellationException) throw error
                 failCall(event.callId, error.message ?: "Could not connect the call")
             }
         }
@@ -624,6 +662,7 @@ class CallManager(
                 .also { _state.value = it }
         }
         cancelTimers()
+        stopSignalPolling()
         notifications.cancelIncomingCall()
         scope.launch(Dispatchers.Default) {
             cleanupMedia()
@@ -1055,7 +1094,8 @@ class CallManager(
         private const val RING_TIMEOUT_MILLIS = 45_000L
         private const val CONNECT_TIMEOUT_MILLIS = 30_000L
         private const val DISCONNECT_TIMEOUT_MILLIS = 15_000L
-        private const val END_SCREEN_MILLIS = 1_900L
+        private const val END_SCREEN_MILLIS = 3_500L
+        private const val CALL_SIGNAL_POLL_MILLIS = 1_500L
         private const val MAX_OFFER_AGE_MILLIS = 90_000L
         private const val MAX_BUFFERED_CANDIDATES = 80
         private const val MAX_PENDING_CALL_IDS = 4
