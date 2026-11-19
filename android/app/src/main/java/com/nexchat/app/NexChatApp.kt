@@ -27,6 +27,7 @@ import com.nexchat.app.data.ContactRepository
 import com.nexchat.app.net.WebSocketManager
 import com.nexchat.app.service.CleanupWorker
 import com.nexchat.app.service.NotificationHelper
+import com.nexchat.app.service.OutboxWorker
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -64,6 +65,7 @@ class AppContainer(val app: Application) {
         wire()
         retryBootstrap()
         scheduleCleanup()
+        scheduleOutbox()
     }
 
     fun retryBootstrap() {
@@ -86,6 +88,8 @@ class AppContainer(val app: Application) {
                     // Repair one-time/Kyber key exhaustion after upgrades and
                     // reconnects so contacts can always fetch a usable bundle.
                     scope.launch { runCatching { chat.ensurePublishedKeys() } }
+                    // Drain anything composed while the process was offline.
+                    scope.launch { runCatching { chat.flushOutbox() } }
                 } else {
                     websocket.stop()
                 }
@@ -119,6 +123,21 @@ class AppContainer(val app: Application) {
             .build()
         WorkManager.getInstance(app).enqueueUniquePeriodicWork(
             CleanupWorker.NAME,
+            ExistingPeriodicWorkPolicy.KEEP,
+            request,
+        )
+    }
+
+    /**
+     * WorkManager's floor is 15 minutes. This is intentionally a slow safety
+     * net: the foreground service retries every few seconds whenever the
+     * process is alive, and this guarantees progress after a process kill.
+     */
+    private fun scheduleOutbox() {
+        val request = PeriodicWorkRequestBuilder<OutboxWorker>(15, TimeUnit.MINUTES)
+            .build()
+        WorkManager.getInstance(app).enqueueUniquePeriodicWork(
+            OutboxWorker.NAME,
             ExistingPeriodicWorkPolicy.KEEP,
             request,
         )

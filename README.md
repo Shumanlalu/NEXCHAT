@@ -20,8 +20,9 @@ numbers, and per-device sessions.
 | Online one-to-one messaging | Implemented with per-device Signal sessions |
 | Private groups | Implemented as pairwise encrypted fan-out to every member device |
 | Encrypted local storage | SQLCipher; key protected with Android Keystore AES-GCM |
-| Message states | Pending, sent, delivered, read, failed; one online delivery attempt, then marked failed if the relay is unreachable |
-| Reliability | Online-only sending with no local retry, reusable last-resort Kyber prekeys, optional one-time prekeys, device-list refresh, duplicate-envelope detection, 5-second queued-message polling fallback |
+| Message states | Pending, sent, delivered, read, failed; sent only after the relay accepts ciphertext, delivered only after the recipient device acknowledges it |
+| Reliability | Durable SQLCipher-backed intent/outbox queues, automatic exponential-backoff retry, relay deduplication, durable delivery receipts, device-list refresh, duplicate-envelope detection, 5-second queued-message polling fallback, 15-minute WorkManager safety net |
+| Offline composition | Messages can be written with no connection; encrypted content and the local bubble survive process death and send automatically when the relay is reachable |
 | Identity verification | Per-device numeric safety numbers, contact-level verification marker, proactive identity-change detection, manual session reset from the contact screen |
 | Attachments | Not implemented in this build; avatar uploads are re-encoded to strip EXIF/GPS metadata |
 | Voice calls | One-to-one WebRTC audio with 1.5-second call-signal polling; SDP and ICE travel inside Signal envelopes. Video is not implemented |
@@ -30,11 +31,12 @@ numbers, and per-device sessions.
 | QR device linking | Not implemented; sign in separately on each device |
 | Push notifications | Not implemented; a foreground WebSocket service keeps the connection alive |
 
-Sending is online-only. Each message gets one immediate delivery attempt. If the
-relay cannot be reached, the local outbox rows are deleted, the message is marked
-**failed**, and nothing is retried in the background. Ciphertext already accepted
-by the relay remains in the encrypted server queue, so a recipient who reconnects
-later still fetches it through the polling fallback.
+Sending is offline-first. A composed message is written to the encrypted local
+queue before any network call. If the relay is unreachable, the message stays
+**pending** and is retried with exponential backoff while the process is alive.
+WorkManager provides a 15-minute background safety net after a process kill. The
+relay deduplicates `(sender device, recipient device, client message ID)`, so a
+retry after a lost response cannot create a second message.
 
 ## Security model
 
@@ -143,10 +145,21 @@ alternative that keeps a persistent process, use the Docker stack above.
 
 Vercel Functions have a maximum WebSocket lifetime (300 seconds on the Hobby
 plan). The Android client reconnects with exponential backoff and polls the
-encrypted-envelope queue every 20 seconds, so messages still arrive if a socket
-expires or a push reaches a different function instance. For guaranteed
-low-latency realtime fan-out at scale, deploy the Docker server on a host that
-keeps one process running, or add a shared pub/sub layer.
+encrypted-envelope queue every 5 seconds while a chat is visible, so messages
+still arrive if a socket expires or a push reaches a different function
+instance. For guaranteed low-latency realtime fan-out at scale, deploy the
+Docker server on a host that keeps one process running, or add a shared pub/sub
+layer.
+
+### Supabase database
+
+`supabase/` contains a deployable schema, RLS lockdown, and storage policies for
+running the relay against a Supabase project that you own. It has **not** been
+applied to a project yet because no Supabase project reference or authorized
+session is available in this workspace. See
+[SUPABASE_DEPLOYMENT.md](SUPABASE_DEPLOYMENT.md) for the exact owner actions and
+rollback plan. The production relay remains on Vercel + Neon until that cutover
+is verified.
 
 ## Build the Android app
 
@@ -218,16 +231,16 @@ only to the HTTPS server baked into that build.
 - No Android emulator or physical device is available in this workspace, so the
   APK has not been runtime-tested. Build success is not the same as device
   verification.
-- Online messaging needs either the WebSocket or the 5-second queue poll, so
-  the app process or foreground service must be running. There is no
-  push-notification service; aggressive battery optimizations can delay
-  messages until the app is opened again. If a send attempt fails, NEXCHAT does
-  not retry it automatically; the message is marked failed and can be sent again
-  by the user.
+- Offline composition is durable: the encrypted intent and outbox rows survive
+  process death and retry with exponential backoff, and WorkManager provides a
+  15-minute background safety net. Without a push-notification service, a
+  killed app can still wait up to that WorkManager interval before it wakes to
+  fetch incoming messages.
 - On the Vercel deployment, realtime presence and delivery-receipt pushes are
   best-effort because a socket may be held by a different function instance from
-  the HTTP request. Queued ciphertext is still fetched by polling; treat the
-  delivered tick as eventually consistent on that host.
+  the HTTP request. Queued ciphertext is still fetched by polling. Delivery is
+  recorded in durable server receipts and synced on reconnect; a message is
+  never marked delivered before the recipient device acknowledges it.
 - Bluetooth LE nearby delivery, attachments, offline voice-note transcription,
   and QR device linking are intentionally absent and reported as unavailable in
   the UI. There is no WebGL/3D renderer; the silver interface is drawn natively

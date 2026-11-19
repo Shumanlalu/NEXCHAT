@@ -804,7 +804,11 @@ private fun MessageBubble(
                     MessageStatusIcon(message.status, outgoing)
                 }
             }
-            if (message.status == MessageStatus.FAILED && message.error != null) {
+            if (
+                (message.status == MessageStatus.FAILED ||
+                    message.status == MessageStatus.PENDING) &&
+                message.error != null
+            ) {
                 Spacer(Modifier.height(2.dp))
                 Text(
                     message.error,

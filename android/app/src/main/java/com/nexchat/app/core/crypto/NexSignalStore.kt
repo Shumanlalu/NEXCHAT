@@ -28,6 +28,23 @@ import org.signal.libsignal.protocol.state.SignedPreKeyRecord
 import org.signal.libsignal.protocol.state.SignedPreKeyStore
 import org.signal.libsignal.protocol.ecc.ECPublicKey
 
+/**
+ * libsignal stores device IDs in a NonZeroU8, so its protocol address parser
+ * only accepts 1..127. Older NEXCHAT builds generated random 32-bit IDs and
+ * those values are still present on the relay. Keeping the raw value for the
+ * server is necessary, but every address handed to libsignal has to use a
+ * canonical value in the supported range.
+ */
+const val MIN_SIGNAL_DEVICE_ID = 1
+const val MAX_SIGNAL_DEVICE_ID = 127
+
+fun canonicalSignalDeviceId(raw: Int): Int =
+    if (raw in MIN_SIGNAL_DEVICE_ID..MAX_SIGNAL_DEVICE_ID) {
+        raw
+    } else {
+        Math.floorMod(raw, MAX_SIGNAL_DEVICE_ID) + MIN_SIGNAL_DEVICE_ID
+    }
+
 data class UploadKeyBatch(
     val signedPreKeyId: Int,
     val signedPreKeyPublic: String,
@@ -98,6 +115,7 @@ class NexSignalStore(private val db: NexDatabase) : SignalProtocolStore {
                     }
                 }
             }
+            repairLoadedStateLocked()
             initialized = true
         }
     }
@@ -131,12 +149,23 @@ class NexSignalStore(private val db: NexDatabase) : SignalProtocolStore {
             }
             if (localDeviceId == null) {
                 localDeviceId = UUID.randomUUID().toString()
-                localSignalDeviceId = random.nextInt(Int.MAX_VALUE - 1) + 1
+                localSignalDeviceId = randomValidDeviceId()
                 persist(KEY_DEVICE_ID, localDeviceId!!.toByteArray(Charsets.UTF_8))
                 persist(
                     KEY_SIGNAL_DEVICE_ID,
                     ByteBuffer.allocate(4).putInt(localSignalDeviceId).array(),
                 )
+            } else if (localSignalDeviceId !in MIN_SIGNAL_DEVICE_ID..MAX_SIGNAL_DEVICE_ID) {
+                // A device row created by an older build can hold an ID that
+                // libsignal refuses to address. Rotate it once and clear the
+                // pairwise sessions so peers complete a fresh handshake with
+                // the corrected device ID.
+                localSignalDeviceId = randomValidDeviceId()
+                persist(
+                    KEY_SIGNAL_DEVICE_ID,
+                    ByteBuffer.allocate(4).putInt(localSignalDeviceId).array(),
+                )
+                clearSessionsLocked()
             }
             return LocalDeviceIdentity(
                 deviceId = requireNotNull(localDeviceId),
@@ -156,14 +185,32 @@ class NexSignalStore(private val db: NexDatabase) : SignalProtocolStore {
         }
     }
 
+    /**
+     * Makes the relay's device ID authoritative without changing the identity
+     * key. When the ID actually changes, pairwise sessions are dropped so the
+     * next outbound message is a fresh prekey message that peers can bind to
+     * the corrected address.
+     */
+    suspend fun adoptSignalDeviceId(newId: Int): Boolean {
+        if (newId !in MIN_SIGNAL_DEVICE_ID..MAX_SIGNAL_DEVICE_ID) return false
+        initialize()
+        synchronized(lock) {
+            if (localSignalDeviceId == newId) return false
+            localSignalDeviceId = newId
+            persist(KEY_SIGNAL_DEVICE_ID, ByteBuffer.allocate(4).putInt(newId).array())
+            clearSessionsLocked()
+            return true
+        }
+    }
+
     @Synchronized
     fun hasSession(nexId: String, signalDeviceId: Int): Boolean = synchronized(lock) {
-        sessions.containsKey(addressKey(SignalProtocolAddress(nexId, signalDeviceId)))
+        sessions.containsKey(addressKey(SignalProtocolAddress(nexId, canonicalSignalDeviceId(signalDeviceId))))
     }
 
     @Synchronized
     fun peerIdentityBase64(nexId: String, signalDeviceId: Int): String? = synchronized(lock) {
-        val key = addressKey(SignalProtocolAddress(nexId, signalDeviceId))
+        val key = addressKey(SignalProtocolAddress(nexId, canonicalSignalDeviceId(signalDeviceId)))
         trustedIdentities[key]?.let { Base64.encodeToString(it.serialize(), Base64.NO_WRAP) }
     }
 
@@ -172,6 +219,7 @@ class NexSignalStore(private val db: NexDatabase) : SignalProtocolStore {
         sessions.keys
             .filter { it.startsWith("$nexId|") }
             .mapNotNull { it.substringAfter("$nexId|").toIntOrNull() }
+            .filter { it in MIN_SIGNAL_DEVICE_ID..MAX_SIGNAL_DEVICE_ID }
             .sorted()
     }
 
@@ -288,6 +336,7 @@ class NexSignalStore(private val db: NexDatabase) : SignalProtocolStore {
     override fun getSubDeviceSessions(name: String): List<Int> = synchronized(lock) {
         sessions.keys.filter { it.startsWith("$name|") }
             .mapNotNull { it.substringAfter("$name|").toIntOrNull() }
+            .filter { it in MIN_SIGNAL_DEVICE_ID..MAX_SIGNAL_DEVICE_ID }
     }
 
     override fun storeSession(address: SignalProtocolAddress, record: SessionRecord) = synchronized(lock) {
@@ -433,6 +482,59 @@ class NexSignalStore(private val db: NexDatabase) : SignalProtocolStore {
             id = random.nextInt(Int.MAX_VALUE - 1) + 1
         } while (existing.contains(id))
         return id
+    }
+
+    private fun randomValidDeviceId(): Int =
+        random.nextInt(MAX_SIGNAL_DEVICE_ID - MIN_SIGNAL_DEVICE_ID + 1) + MIN_SIGNAL_DEVICE_ID
+
+    private fun repairLoadedStateLocked() {
+        if (localDeviceId != null && localSignalDeviceId !in MIN_SIGNAL_DEVICE_ID..MAX_SIGNAL_DEVICE_ID) {
+            localSignalDeviceId = randomValidDeviceId()
+            persist(
+                KEY_SIGNAL_DEVICE_ID,
+                ByteBuffer.allocate(4).putInt(localSignalDeviceId).array(),
+            )
+            clearSessionsLocked()
+        }
+        migrateAddressKeysLocked(sessions, PREFIX_SESSION) { it.serialize() }
+        migrateAddressKeysLocked(trustedIdentities, PREFIX_IDENTITY_PEER) { it.serialize() }
+    }
+
+    /**
+     * Sessions written by a build that still used 32-bit device IDs are keyed
+     * by an address libsignal cannot parse. Move them to the canonical address
+     * so an existing ratchet keeps working after the upgrade.
+     */
+    private fun <T> migrateAddressKeysLocked(
+        store: MutableMap<String, T>,
+        prefix: String,
+        serialize: (T) -> ByteArray,
+    ) {
+        for (key in store.keys.toList()) {
+            val canonical = canonicalAddressKey(key) ?: continue
+            if (canonical == key) continue
+            val value = store.remove(key) ?: continue
+            dao.deleteBlocking(prefix + key)
+            if (!store.containsKey(canonical)) {
+                store[canonical] = value
+                persist(prefix + canonical, serialize(value))
+            }
+        }
+    }
+
+    private fun canonicalAddressKey(key: String): String? {
+        val separator = key.lastIndexOf('|')
+        if (separator <= 0 || separator == key.lastIndex) return null
+        val name = key.substring(0, separator)
+        val deviceId = key.substring(separator + 1).toIntOrNull() ?: return null
+        return "$name|${canonicalSignalDeviceId(deviceId)}"
+    }
+
+    private fun clearSessionsLocked() {
+        for (key in sessions.keys.toList()) {
+            dao.deleteBlocking(PREFIX_SESSION + key)
+        }
+        sessions.clear()
     }
 
     private fun persist(key: String, value: ByteArray) {

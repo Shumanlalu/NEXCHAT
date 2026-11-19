@@ -7,6 +7,7 @@ import type { TokenService } from "../security/tokens";
 import {
   ackSchema,
   parseWith,
+  receiptAckSchema,
   reportSchema,
   sendEnvelopeSchema,
 } from "../validation";
@@ -112,7 +113,11 @@ export async function registerMessageRoutes(app: FastifyInstance, deps: Deps): P
         userCache.set(message.recipientNexId, recipient);
       }
       if (!recipient) {
-        skipped.push({ clientId: message.clientId, reason: "RECIPIENT_NOT_FOUND" });
+        skipped.push({
+          clientId: message.clientId,
+          reason: "RECIPIENT_NOT_FOUND",
+          recipientSignalDeviceId: message.recipientSignalDeviceId,
+        });
         continue;
       }
 
@@ -131,7 +136,11 @@ export async function registerMessageRoutes(app: FastifyInstance, deps: Deps): P
         devicesCache.set(deviceKey, device);
       }
       if (!device || device.revoked_at) {
-        skipped.push({ clientId: message.clientId, reason: "DEVICE_NOT_ACTIVE" });
+        skipped.push({
+          clientId: message.clientId,
+          reason: "DEVICE_NOT_ACTIVE",
+          recipientSignalDeviceId: message.recipientSignalDeviceId,
+        });
         continue;
       }
 
@@ -140,7 +149,11 @@ export async function registerMessageRoutes(app: FastifyInstance, deps: Deps): P
         if (!membership) {
           const group = await db.one<{ id: string }>("SELECT id FROM groups WHERE id = $1", [message.groupId]);
           if (!group) {
-            skipped.push({ clientId: message.clientId, reason: "GROUP_NOT_FOUND" });
+            skipped.push({
+              clientId: message.clientId,
+              reason: "GROUP_NOT_FOUND",
+              recipientSignalDeviceId: message.recipientSignalDeviceId,
+            });
             continue;
           }
           const senderIsMember = await isGroupMember(db, message.groupId, auth.user.id);
@@ -148,18 +161,30 @@ export async function registerMessageRoutes(app: FastifyInstance, deps: Deps): P
           groupMembershipCache.set(message.groupId, membership);
         }
         if (!membership.sender) {
-          skipped.push({ clientId: message.clientId, reason: "NOT_A_GROUP_MEMBER" });
+          skipped.push({
+            clientId: message.clientId,
+            reason: "NOT_A_GROUP_MEMBER",
+            recipientSignalDeviceId: message.recipientSignalDeviceId,
+          });
           continue;
         }
         const recipientIsMember = await isGroupMember(db, message.groupId, recipient.id);
         if (!recipientIsMember) {
-          skipped.push({ clientId: message.clientId, reason: "RECIPIENT_NOT_IN_GROUP" });
+          skipped.push({
+            clientId: message.clientId,
+            reason: "RECIPIENT_NOT_IN_GROUP",
+            recipientSignalDeviceId: message.recipientSignalDeviceId,
+          });
           continue;
         }
       }
 
       if (message.ephemeral && !hub.isOnline(device.id)) {
-        skipped.push({ clientId: message.clientId, reason: "EPHEMERAL_TARGET_OFFLINE" });
+        skipped.push({
+          clientId: message.clientId,
+          reason: "EPHEMERAL_TARGET_OFFLINE",
+          recipientSignalDeviceId: message.recipientSignalDeviceId,
+        });
         continue;
       }
 
@@ -202,7 +227,11 @@ export async function registerMessageRoutes(app: FastifyInstance, deps: Deps): P
         )) ?? undefined;
       }
       if (!acceptedEnvelope) {
-        skipped.push({ clientId: message.clientId, reason: "ENQUEUE_FAILED" });
+        skipped.push({
+          clientId: message.clientId,
+          reason: "ENQUEUE_FAILED",
+          recipientSignalDeviceId: message.recipientSignalDeviceId,
+        });
         continue;
       }
 
@@ -212,6 +241,9 @@ export async function registerMessageRoutes(app: FastifyInstance, deps: Deps): P
         recipientDeviceId: acceptedEnvelope.recipient_device_id,
         envelopeId: acceptedEnvelope.id,
         createdAt: new Date(acceptedEnvelope.created_at).toISOString(),
+        deliveredAt: acceptedEnvelope.delivered_at
+          ? new Date(acceptedEnvelope.delivered_at).toISOString()
+          : null,
       });
       if (insertedRows[0]) {
         pushed.push({
@@ -239,13 +271,37 @@ export async function registerMessageRoutes(app: FastifyInstance, deps: Deps): P
     const auth = await requireAuth(request, db, tokens);
     const body = parseWith(ackSchema, request.body);
     const placeholders = body.envelopeIds.map((_, index) => `$${index + 2}`).join(",");
-    const rows = await db.query<EnvelopeRow>(
-      `UPDATE envelopes SET delivered_at = now()
-       WHERE recipient_device_id = $1 AND delivered_at IS NULL
-         AND expires_at > now() AND id IN (${placeholders})
-       RETURNING *`,
-      [auth.device.id, ...body.envelopeIds],
-    );
+    // Keep the envelope row after delivery. It is the durable idempotency
+    // record for retries and it expires naturally through the TTL cleanup.
+    const rows = await db.transaction(async (client) => {
+      const updated = await client.query<EnvelopeRow>(
+        `UPDATE envelopes SET delivered_at = now()
+         WHERE recipient_device_id = $1 AND delivered_at IS NULL
+           AND expires_at > now() AND id IN (${placeholders})
+         RETURNING *`,
+        [auth.device.id, ...body.envelopeIds],
+      );
+      for (const row of updated.rows) {
+        await client.query(
+          `INSERT INTO delivery_receipts
+             (id, sender_user_id, sender_device_id, recipient_user_id,
+              recipient_device_id, envelope_id, client_id, delivered_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+           ON CONFLICT (sender_device_id, recipient_device_id, client_id) DO NOTHING`,
+          [
+            randomUUID(),
+            row.sender_user_id,
+            row.sender_device_id,
+            row.recipient_user_id,
+            row.recipient_device_id,
+            row.id,
+            row.client_id,
+            row.delivered_at ?? new Date(),
+          ],
+        );
+      }
+      return updated.rows;
+    });
 
     for (const row of rows) {
       hub.sendToUser(row.sender_user_id, {
@@ -253,16 +309,50 @@ export async function registerMessageRoutes(app: FastifyInstance, deps: Deps): P
         clientId: row.client_id,
         envelopeId: row.id,
         recipientDeviceId: row.recipient_device_id,
-        deliveredAt: new Date().toISOString(),
+        deliveredAt: new Date(row.delivered_at ?? Date.now()).toISOString(),
       });
     }
 
-    if (rows.length > 0) {
-      const ids = rows.map((row) => row.id);
-      const deletePlaceholders = ids.map((_, index) => `$${index + 1}`).join(",");
-      await db.query(`DELETE FROM envelopes WHERE id IN (${deletePlaceholders})`, ids);
-    }
+    return reply.send({ acknowledged: rows.length });
+  });
 
+  app.get("/v1/messages/receipts", async (request, reply) => {
+    const auth = await requireAuth(request, db, tokens);
+    const rows = await db.query<{
+      id: string;
+      client_id: string;
+      envelope_id: string;
+      recipient_device_id: string;
+      delivered_at: Date | string;
+    }>(
+      `SELECT id, client_id, envelope_id, recipient_device_id, delivered_at
+       FROM delivery_receipts
+       WHERE sender_device_id = $1
+       ORDER BY delivered_at ASC
+       LIMIT 500`,
+      [auth.device.id],
+    );
+    return reply.send({
+      receipts: rows.map((row) => ({
+        id: row.id,
+        clientId: row.client_id,
+        envelopeId: row.envelope_id,
+        recipientDeviceId: row.recipient_device_id,
+        deliveredAt: new Date(row.delivered_at).toISOString(),
+      })),
+    });
+  });
+
+  app.post("/v1/messages/receipts/ack", async (request, reply) => {
+    const auth = await requireAuth(request, db, tokens);
+    const body = parseWith(receiptAckSchema, request.body);
+    const placeholders = body.receiptIds.map((_, index) => `$${index + 2}`).join(",");
+    const rows = await db.query<{ id: string }>(
+      `DELETE FROM delivery_receipts
+       WHERE sender_device_id = $1 AND id IN (${placeholders})
+       RETURNING id`,
+      [auth.device.id, ...body.receiptIds],
+    );
     return reply.send({ acknowledged: rows.length });
   });
 
@@ -310,6 +400,11 @@ export async function registerMessageRoutes(app: FastifyInstance, deps: Deps): P
   const cleanup = setInterval(() => {
     void db.query("DELETE FROM envelopes WHERE expires_at <= now()").catch((error: unknown) => {
       app.log.error({ err: error }, "envelope cleanup failed");
+    });
+    void db.query(
+      "DELETE FROM delivery_receipts WHERE delivered_at < now() - interval '30 days'",
+    ).catch((error: unknown) => {
+      app.log.error({ err: error }, "receipt cleanup failed");
     });
   }, 10 * 60 * 1000);
   cleanup.unref();

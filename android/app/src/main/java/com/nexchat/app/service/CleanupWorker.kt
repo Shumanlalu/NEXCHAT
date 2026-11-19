@@ -14,6 +14,8 @@ class CleanupWorker(context: Context, params: WorkerParameters) : CoroutineWorke
             val now = System.currentTimeMillis()
             db.processedEnvelopeDao().purge(now - 30L * 24 * 3600 * 1000)
             db.outboxDao().purgeOlderThan(now - 7L * 24 * 3600 * 1000)
+            db.pendingIntentDao().purgeExpired(now)
+            db.pendingIntentDao().purgeOlderThan(now - 7L * 24 * 3600 * 1000)
             db.relayDao().purgeExpired(now)
         }.fold(onSuccess = { Result.success() }, onFailure = { Result.retry() })
     }

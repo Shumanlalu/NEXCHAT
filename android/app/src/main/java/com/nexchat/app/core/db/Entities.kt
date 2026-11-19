@@ -1,5 +1,6 @@
 package com.nexchat.app.core.db
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -146,6 +147,42 @@ data class OutboxEntity(
     val expiresAt: Long,
     val attempts: Int = 0,
     val lastAttemptAt: Long? = null,
+    @ColumnInfo(defaultValue = "0") val nextAttemptAt: Long = 0,
+    val lastError: String? = null,
+)
+
+/**
+ * A durable, SQLCipher-encrypted send intent. Ciphertext for a target device
+ * can only be produced once the recipient's current bundle is reachable, so
+ * the sealed content is kept here until encryption and relay acceptance have
+ * both succeeded.
+ */
+@Entity(
+    tableName = "pending_intents",
+    indices = [
+        Index(value = ["clientId"]),
+        Index(value = ["nextAttemptAt"]),
+        Index(value = ["createdAt"]),
+    ],
+)
+data class PendingIntentEntity(
+    @PrimaryKey val id: String,
+    val clientId: String,
+    val conversationId: String,
+    val contentJson: String,
+    val durable: Boolean,
+    val createdAt: Long,
+    val expiresAt: Long,
+    val attempts: Int = 0,
+    val lastAttemptAt: Long? = null,
+    @ColumnInfo(defaultValue = "0") val nextAttemptAt: Long = 0,
+    val lastError: String? = null,
+    /**
+     * Set once ciphertext rows exist in the outbox. While this is non-null the
+     * intent must not be encrypted again: those rows already advanced the
+     * Signal ratchet and are retried from the outbox.
+     */
+    val materializedAt: Long? = null,
 )
 
 @Entity(

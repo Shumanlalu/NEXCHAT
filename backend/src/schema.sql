@@ -81,6 +81,25 @@ CREATE INDEX IF NOT EXISTS envelopes_recipient_idx
     ON envelopes(recipient_device_id, created_at) WHERE delivered_at IS NULL;
 CREATE INDEX IF NOT EXISTS envelopes_expiry_idx ON envelopes(expires_at);
 
+-- Durable delivery receipts. The sender may be offline when the recipient
+-- acknowledges an envelope, so the receipt outlives the ephemeral WebSocket
+-- event. It is keyed by sender device + recipient device + client message ID so
+-- retries cannot create duplicates.
+CREATE TABLE IF NOT EXISTS delivery_receipts (
+    id UUID PRIMARY KEY,
+    sender_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    sender_device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    recipient_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    recipient_device_id UUID NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    envelope_id UUID NOT NULL,
+    client_id UUID NOT NULL,
+    delivered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (sender_device_id, recipient_device_id, client_id)
+);
+CREATE INDEX IF NOT EXISTS delivery_receipts_sender_idx
+    ON delivery_receipts(sender_device_id, delivered_at);
+CREATE INDEX IF NOT EXISTS delivery_receipts_age_idx ON delivery_receipts(delivered_at);
+
 CREATE TABLE IF NOT EXISTS groups (
     id UUID PRIMARY KEY,
     created_by UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,

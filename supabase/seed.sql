@@ -1,0 +1,3 @@
+-- NEXCHAT has no seed data. Accounts are created through the relay's
+-- username/password registration endpoint. Keeping this file empty makes
+-- `supabase db reset` deterministic.

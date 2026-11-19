@@ -28,6 +28,8 @@ export const deviceSchema = z.object({
   name: z.string().trim().min(1).max(64),
   platform: z.string().trim().max(32).default("android"),
   registrationId: z.number().int().min(0).max(16383),
+  // Older APKs still send 32-bit values. The relay normalizes them to a
+  // libsignal-safe ID (1..127) before storing; see insertDevice in auth.ts.
   signalDeviceId: z.number().int().min(1).max(2_147_483_647),
   identityKey: base64(256, "identityKey"),
   signedPreKeyId: z.number().int().min(0).max(2_147_483_647),
@@ -89,6 +91,12 @@ export const rotateKeysSchema = z.object({
     .max(200),
 });
 
+export const signalDeviceIdSchema = z.object({
+  // Accept legacy 32-bit values here too; the route normalizes them before
+  // persisting so an old installation can repair itself without reinstalling.
+  signalDeviceId: z.number().int().min(1).max(2_147_483_647).optional(),
+});
+
 export const sendEnvelopeSchema = z.object({
   messages: z
     .array(
@@ -109,6 +117,10 @@ export const sendEnvelopeSchema = z.object({
 
 export const ackSchema = z.object({
   envelopeIds: z.array(z.string().uuid()).min(1).max(200),
+});
+
+export const receiptAckSchema = z.object({
+  receiptIds: z.array(z.string().uuid()).min(1).max(500),
 });
 
 export const groupCreateSchema = z.object({

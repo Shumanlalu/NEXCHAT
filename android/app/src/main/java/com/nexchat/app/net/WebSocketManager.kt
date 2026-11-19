@@ -199,6 +199,9 @@ class WebSocketManager(
                 socket = webSocket
                 _state.value = ConnectionState.CONNECTED
                 onOpened()
+                // Drain ciphertext and intents that accumulated while offline
+                // immediately instead of waiting for the next poll tick.
+                scope.launch { runCatching { chat.flushOutbox() } }
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -211,7 +214,12 @@ class WebSocketManager(
                         }
                     }
                     "delivered" -> event.clientId?.let { clientId ->
-                        scope.launch { chat.markDelivered(clientId) }
+                        scope.launch {
+                            val at = event.deliveredAt?.let {
+                                runCatching { java.time.Instant.parse(it).toEpochMilli() }.getOrNull()
+                            } ?: System.currentTimeMillis()
+                            chat.markDelivered(clientId, at)
+                        }
                     }
                 }
             }

@@ -112,6 +112,16 @@ interface ConversationDao {
     @Query("UPDATE conversations SET lastMessagePreview = :preview, lastMessageAt = :at, updatedAt = :at WHERE id = :id")
     suspend fun touch(id: String, preview: String, at: Long)
 
+    /**
+     * Applies an incoming message timestamp only when it is newer than the last
+     * one. Queued or delayed envelopes must not move a conversation backwards.
+     */
+    @Query(
+        """UPDATE conversations SET lastMessagePreview = :preview, lastMessageAt = :at,
+           updatedAt = MAX(updatedAt, :at) WHERE id = :id AND lastMessageAt <= :at""",
+    )
+    suspend fun touchIfNewer(id: String, preview: String, at: Long)
+
     @Query("UPDATE conversations SET draft = :draft WHERE id = :id")
     suspend fun setDraft(id: String, draft: String)
 
@@ -183,6 +193,9 @@ interface MessageDao {
 
     @Query("UPDATE messages SET error = :error WHERE id = :id")
     suspend fun setError(id: String, error: String?)
+
+    @Query("UPDATE messages SET error = NULL WHERE id = :id AND status != 'FAILED'")
+    suspend fun clearError(id: String)
 
     @Query(
         """SELECT * FROM messages WHERE conversationId = :conversationId
@@ -268,8 +281,11 @@ interface SignalStateDao {
 
 @Dao
 interface OutboxDao {
-    @Query("SELECT * FROM outbox WHERE createdAt <= :now ORDER BY createdAt ASC LIMIT :limit")
+    @Query("SELECT * FROM outbox WHERE nextAttemptAt <= :now ORDER BY createdAt ASC LIMIT :limit")
     suspend fun due(now: Long, limit: Int): List<OutboxEntity>
+
+    @Query("SELECT * FROM outbox WHERE expiresAt <= :now ORDER BY createdAt ASC LIMIT :limit")
+    suspend fun expired(now: Long, limit: Int = 200): List<OutboxEntity>
 
     @Query("SELECT * FROM outbox WHERE clientId = :clientId")
     suspend fun forClient(clientId: String): List<OutboxEntity>
@@ -283,8 +299,14 @@ interface OutboxDao {
     @Query("DELETE FROM outbox WHERE id = :id")
     suspend fun delete(id: String)
 
-    @Query("UPDATE outbox SET attempts = attempts + 1, lastAttemptAt = :at WHERE id = :id")
-    suspend fun markAttempt(id: String, at: Long)
+    @Query(
+        """UPDATE outbox SET attempts = attempts + 1, lastAttemptAt = :at,
+           nextAttemptAt = :nextAttemptAt, lastError = :error WHERE id = :id""",
+    )
+    suspend fun markAttempt(id: String, at: Long, nextAttemptAt: Long, error: String?)
+
+    @Query("UPDATE outbox SET nextAttemptAt = :nextAttemptAt WHERE id = :id")
+    suspend fun schedule(id: String, nextAttemptAt: Long)
 
     @Query("DELETE FROM outbox WHERE clientId = :clientId")
     suspend fun deleteForClient(clientId: String)
@@ -309,6 +331,65 @@ interface OutboxDao {
 
     @Query("SELECT COUNT(*) FROM outbox")
     suspend fun count(): Int
+}
+
+@Dao
+interface PendingIntentDao {
+    @Query("SELECT * FROM pending_intents WHERE nextAttemptAt <= :now ORDER BY createdAt ASC LIMIT :limit")
+    suspend fun due(now: Long, limit: Int): List<PendingIntentEntity>
+
+    @Query("SELECT * FROM pending_intents WHERE expiresAt <= :now ORDER BY createdAt ASC LIMIT :limit")
+    suspend fun expired(now: Long, limit: Int = 200): List<PendingIntentEntity>
+
+    @Query("SELECT * FROM pending_intents WHERE clientId = :clientId")
+    suspend fun forClient(clientId: String): List<PendingIntentEntity>
+
+    @Query("SELECT COUNT(*) FROM pending_intents WHERE clientId = :clientId")
+    suspend fun countForClient(clientId: String): Int
+
+    @Query(
+        """SELECT * FROM pending_intents WHERE materializedAt IS NOT NULL
+           AND clientId NOT IN (SELECT DISTINCT clientId FROM outbox)""",
+    )
+    suspend fun materializedWithoutOutbox(): List<PendingIntentEntity>
+
+    @Upsert
+    suspend fun upsert(intent: PendingIntentEntity)
+
+    @Query("DELETE FROM pending_intents WHERE id = :id")
+    suspend fun delete(id: String)
+
+    @Query("DELETE FROM pending_intents WHERE clientId = :clientId")
+    suspend fun deleteForClient(clientId: String)
+
+    @Query("UPDATE pending_intents SET materializedAt = :at, lastError = NULL WHERE id = :id")
+    suspend fun markMaterialized(id: String, at: Long)
+
+    /**
+     * Returns a materialized intent to the encryption phase after a target
+     * device disappeared. The outbox rows for that device must be removed
+     * first so a fresh bundle can be fetched for its replacement.
+     */
+    @Query(
+        """UPDATE pending_intents SET materializedAt = NULL, attempts = 0,
+           nextAttemptAt = :nextAttemptAt, lastError = NULL WHERE clientId = :clientId""",
+    )
+    suspend fun reopen(clientId: String, nextAttemptAt: Long = 0)
+
+    @Query(
+        """UPDATE pending_intents SET attempts = attempts + 1, lastAttemptAt = :at,
+           nextAttemptAt = :nextAttemptAt, lastError = :error WHERE id = :id""",
+    )
+    suspend fun markAttempt(id: String, at: Long, nextAttemptAt: Long, error: String?)
+
+    @Query("DELETE FROM pending_intents WHERE expiresAt <= :now")
+    suspend fun purgeExpired(now: Long)
+
+    @Query("DELETE FROM pending_intents WHERE createdAt < :cutoff")
+    suspend fun purgeOlderThan(cutoff: Long)
+
+    @Query("DELETE FROM pending_intents")
+    suspend fun deleteAll()
 }
 
 @Dao

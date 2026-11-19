@@ -28,7 +28,11 @@ class SessionExpiredException : ApiException(401, "SESSION_EXPIRED", "Your sessi
 
 val NexJson = Json {
     ignoreUnknownKeys = true
-    encodeDefaults = false
+    // SecureContent.timestamp must travel with every sealed payload. With
+    // encodeDefaults = false the timestamp default would be omitted and the
+    // receiver would substitute its own clock, destroying original ordering
+    // for messages delivered from the durable queue.
+    encodeDefaults = true
     explicitNulls = false
     isLenient = false
 }
@@ -148,6 +152,15 @@ class ApiClient(
     suspend fun preKeyCount(): PreKeyCountResponse =
         decode(authenticated("GET", "/v1/devices/keys/count"))
 
+    suspend fun setSignalDeviceId(signalDeviceId: Int? = null): SignalDeviceIdResponse =
+        decode(
+            authenticated(
+                "POST",
+                "/v1/devices/signal-id",
+                json.encodeToString(SignalDeviceIdRequest(signalDeviceId)),
+            ),
+        )
+
     suspend fun devices(): DevicesResponse = decode(authenticated("GET", "/v1/devices"))
 
     suspend fun revokeDevice(deviceId: String) {
@@ -172,6 +185,18 @@ class ApiClient(
                 "POST",
                 "/v1/messages/ack",
                 json.encodeToString(AckRequest(ids)),
+            ),
+        )
+
+    suspend fun deliveryReceipts(): DeliveryReceiptsResponse =
+        decode(authenticated("GET", "/v1/messages/receipts"))
+
+    suspend fun ackDeliveryReceipts(ids: List<String>): AckResponse =
+        decode(
+            authenticated(
+                "POST",
+                "/v1/messages/receipts/ack",
+                json.encodeToString(ReceiptAckRequest(ids)),
             ),
         )
 

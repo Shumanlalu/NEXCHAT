@@ -3,6 +3,7 @@ package com.nexchat.app.data
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.PagingData
+import androidx.room.withTransaction
 import com.nexchat.app.core.crypto.ContentKind
 import com.nexchat.app.core.crypto.CryptoException
 import com.nexchat.app.core.crypto.DuplicateEnvelopeException
@@ -10,6 +11,7 @@ import com.nexchat.app.core.crypto.GroupMemberInfo
 import com.nexchat.app.core.crypto.IdentityChangedException
 import com.nexchat.app.core.crypto.SecureContent
 import com.nexchat.app.core.crypto.SignalCryptoManager
+import com.nexchat.app.core.crypto.canonicalSignalDeviceId
 import com.nexchat.app.core.db.CallHistoryEntity
 import com.nexchat.app.core.db.ContactEntity
 import com.nexchat.app.core.db.ConversationEntity
@@ -20,6 +22,7 @@ import com.nexchat.app.core.db.MessageKind
 import com.nexchat.app.core.db.MessageStatus
 import com.nexchat.app.core.db.NexDatabase
 import com.nexchat.app.core.db.OutboxEntity
+import com.nexchat.app.core.db.PendingIntentEntity
 import com.nexchat.app.core.db.ProcessedEnvelopeEntity
 import com.nexchat.app.core.network.ApiClient
 import com.nexchat.app.core.network.ApiException
@@ -133,15 +136,15 @@ class ChatRepository(
     private val messageDao = db.messageDao()
     private val groupDao = db.groupDao()
     private val outboxDao = db.outboxDao()
+    private val intentDao = db.pendingIntentDao()
     private val processedDao = db.processedEnvelopeDao()
     private val callHistoryDao = db.callHistoryDao()
-    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = false; explicitNulls = false }
+    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; explicitNulls = false }
 
     private val sendMutex = Mutex()
     private val receiveMutex = Mutex()
     private val replenishMutex = Mutex()
     @Volatile private var lastPreKeyCheckAt = 0L
-    @Volatile private var staleOutboxCleared = false
     private val deviceCacheMutex = Mutex()
     private val deviceCache = mutableMapOf<String, Pair<Long, List<KeyDeviceDto>>>()
     private val _events = MutableSharedFlow<ChatEvent>(extraBufferCapacity = 128)
@@ -227,31 +230,30 @@ class ChatRepository(
                 replyToId = replyTo?.id,
                 replyToPreview = replyTo?.body?.take(160),
             )
-            messageDao.upsert(message)
-            conversationDao.touch(
-                conversationId,
-                previewForMessage(trimmed, conversation.type == "GROUP"),
-                now,
-            )
             val content = baseContent(ContentKind.TEXT, clientId, profile.toSenderInfo()).copy(
                 text = trimmed,
                 replyToId = replyTo?.id,
                 replyPreview = replyTo?.body?.take(160),
             )
+            // Persist the bubble and the send intent atomically. If the app
+            // dies or there is no connection, this exact message is retried
+            // automatically and never creates a second local bubble.
+            db.withTransaction {
+                messageDao.upsert(message)
+                conversationDao.touch(
+                    conversationId,
+                    previewForMessage(trimmed, conversation.type == "GROUP"),
+                    now,
+                )
+                enqueueIntent(conversation, content)
+            }
             try {
-                val targets = resolveConversationTargets(conversation)
-                if (targets.isEmpty()) throw CryptoException("No active encrypted device is available for this conversation")
-                enqueue(conversation, content, targets)
                 flushOutbox()
-            } catch (error: IdentityChangedException) {
-                conversation.peerNexId?.let { contactDao.setVerified(it, null) }
-                messageDao.setError(clientId, friendlyError(error))
-                messageDao.updateStatus(clientId, MessageStatus.FAILED, System.currentTimeMillis())
+            } catch (error: CancellationException) {
                 throw error
-            } catch (error: Exception) {
-                messageDao.setError(clientId, friendlyError(error))
-                messageDao.updateStatus(clientId, MessageStatus.FAILED, System.currentTimeMillis())
-                throw error
+            } catch (_: Exception) {
+                // The intent and message row remain queued. The bubble keeps
+                // its PENDING state and shows the reason in its error line.
             }
         }
 
@@ -314,7 +316,9 @@ class ChatRepository(
         val content = baseContent(ContentKind.READ, UUID.randomUUID().toString(), profile.toSenderInfo()).copy(
             readClientIds = outgoing.map { it.id },
         )
-        runCatching { sendEphemeral(conversation, content) }
+        // Read receipts are part of the conversation state, not ephemeral
+        // presence. Keep them queued until the relay accepts them.
+        runCatching { sendControl(conversation, content) }
     }
 
     suspend fun setTyping(conversationId: String, active: Boolean) = withContext(Dispatchers.IO) {
@@ -338,6 +342,7 @@ class ChatRepository(
             if (content.callId.isNullOrBlank()) return@withContext
             val profile = profileDao.get() ?: return@withContext
             val filled = content.copy(
+                clientId = content.clientId ?: UUID.randomUUID().toString(),
                 senderNexId = profile.nexId,
                 senderUsername = profile.username,
                 senderDisplayName = profile.displayName,
@@ -347,146 +352,386 @@ class ChatRepository(
         }
 
     /**
-     * NEXCHAT sends online only: every queued envelope gets exactly one delivery
-     * attempt. If the relay cannot be reached, the local rows are deleted and
-     * the message is marked failed instead of being retried in the background.
-     * The encrypted server queue is untouched, so a recipient who was already
-     * online still receives accepted ciphertext.
+     * Materializes queued intents, then sends every due encrypted envelope.
+     *
+     * Delivery is at-least-once. A transient failure only pushes the next
+     * attempt into the future: the encrypted row stays inside SQLCipher and the
+     * message keeps its PENDING state. The relay deduplicates
+     * (sender device, recipient device, client ID), so retrying after a lost
+     * response can never deliver the same message twice.
      */
     suspend fun flushOutbox(): Boolean = withContext(Dispatchers.IO) {
-        // Wait for another send instead of skipping this one. A skipped flush
-        // would leave ciphertext in the outbox with no retry to pick it up.
         sendMutex.withLock {
-            val pending = outboxDao.due(System.currentTimeMillis(), 100)
-            if (pending.isEmpty()) return@withLock true
             val now = System.currentTimeMillis()
-            val outgoing = pending.map {
-                OutgoingEnvelope(
-                    recipientNexId = it.recipientNexId,
-                    recipientSignalDeviceId = it.recipientSignalDeviceId,
-                    clientId = it.clientId,
-                    ciphertext = it.ciphertext,
-                    cipherType = it.cipherType,
-                    ephemeral = it.ephemeral,
-                    expiresInSeconds = (((it.expiresAt - now) / 1000L)
-                        .coerceIn(10L, MAX_ENVELOPE_TTL_SECONDS)).toInt(),
-                    groupId = it.groupId,
-                )
-            }
-            val response = try {
-                api.sendEnvelopes(outgoing)
-            } catch (error: Throwable) {
-                withContext(NonCancellable) { discardOutbox(pending, error) }
-                if (error is CancellationException || error is SessionExpiredException) throw error
-                throw ApiException(0, "SEND_FAILED_ONLINE_ONLY", sendFailureMessage(error))
-            }
-            for (accepted in response.accepted) {
-                val row = pending.firstOrNull {
-                    it.clientId == accepted.clientId &&
-                        it.recipientSignalDeviceId == accepted.recipientSignalDeviceId
-                }
-                if (row != null) {
-                    outboxDao.delete(row.id)
-                }
-            }
-            for (accepted in response.accepted.distinctBy { it.clientId }) {
-                if (outboxDao.countForClient(accepted.clientId) == 0) {
-                    messageDao.markSent(accepted.clientId)
-                }
-            }
-            var rejected: ApiException? = null
-            if (response.skipped.isNotEmpty()) {
-                val acceptedClients = response.accepted.map { it.clientId }.toSet()
-                for (skipped in response.skipped.distinctBy { it.clientId }) {
-                    if (skipped.clientId in acceptedClients) continue
-                    if (skipped.reason == "DEVICE_NOT_ACTIVE") {
-                        outboxDao.forClient(skipped.clientId)
-                            .map { it.recipientNexId }
-                            .distinct()
-                            .forEach { invalidateDeviceCache(it) }
-                    }
-                    outboxDao.deleteForClient(skipped.clientId)
-                    messageDao.updateStatus(skipped.clientId, MessageStatus.FAILED, System.currentTimeMillis())
-                    messageDao.setError(skipped.clientId, skipReason(skipped.reason))
-                    if (rejected == null) {
-                        rejected = ApiException(0, skipped.reason, skipReason(skipped.reason))
-                    }
-                }
-            }
-            // Every row must be confirmed by the relay. If a response omitted
-            // one, treat it as failed rather than leaving it for a later retry.
-            val acceptedKeys = response.accepted
-                .map { it.clientId to it.recipientSignalDeviceId }
-                .toSet()
-            val skippedClients = response.skipped.map { it.clientId }.toSet()
-            val unconfirmed = pending.filter {
-                it.clientId !in skippedClients &&
-                    (it.clientId to it.recipientSignalDeviceId) !in acceptedKeys
-            }
-            if (unconfirmed.isNotEmpty()) {
-                discardOutbox(unconfirmed, null)
-            }
-            rejected?.let { throw it }
-            true
+            purgeExpiredQueues(now)
+            materializeIntents(now)
+            dispatchOutbox(now)
         }
     }
 
     /**
-     * Clears local outbox rows left behind by an older build, a crash, or a
-     * killed process. Online-only sending never resumes a send automatically.
+     * Fetches durable delivery receipts. The recipient may have acknowledged an
+     * envelope while this device was offline, in which case the WebSocket event
+     * is long gone and only this endpoint can advance the status to DELIVERED.
      */
-    suspend fun abandonQueuedSends() = withContext(Dispatchers.IO) {
-        if (staleOutboxCleared) return@withContext
-        sendMutex.withLock {
-            if (staleOutboxCleared) return@withLock
-            // Only old rows are crash leftovers. A row enqueued by a send that
-            // is still starting must never be mistaken for one.
-            val pending = outboxDao.due(
-                System.currentTimeMillis() - STALE_OUTBOX_MILLIS,
-                500,
-            )
-            if (pending.isNotEmpty()) discardOutbox(pending, null)
-            staleOutboxCleared = true
+    suspend fun fetchReceipts() = withContext(Dispatchers.IO) {
+        val response = api.deliveryReceipts()
+        if (response.receipts.isEmpty()) return@withContext
+        val deliveredAt = mutableMapOf<String, Long>()
+        for (receipt in response.receipts) {
+            val at = parseTimestamp(receipt.deliveredAt) ?: System.currentTimeMillis()
+            deliveredAt.merge(receipt.clientId, at, ::maxOf)
+        }
+        for ((clientId, at) in deliveredAt) {
+            messageDao.markDelivered(clientId, at)
+            _events.tryEmit(ChatEvent.Delivery(clientId))
+        }
+        runCatching { api.ackDeliveryReceipts(response.receipts.map { it.id }) }
+    }
+
+    private suspend fun purgeExpiredQueues(now: Long) {
+        for (row in outboxDao.expired(now)) {
+            outboxDao.delete(row.id)
+            failIfNothingQueued(row.clientId, "This message expired before it could be sent")
+        }
+        for (intent in intentDao.expired(now)) {
+            intentDao.delete(intent.id)
+            failIfNothingQueued(intent.clientId, "This message expired before it could be sent")
         }
     }
 
-    private suspend fun discardOutbox(rows: List<OutboxEntity>, error: Throwable?) {
-        for (row in rows) {
-            outboxDao.delete(row.id)
-        }
-        val now = System.currentTimeMillis()
-        val message = sendFailureMessage(error)
-        for (clientId in rows.map { it.clientId }.distinct()) {
-            if (outboxDao.countForClient(clientId) == 0) {
-                messageDao.updateStatus(clientId, MessageStatus.FAILED, now)
-                messageDao.setError(clientId, message)
+    private suspend fun materializeIntents(now: Long) {
+        for (intent in intentDao.due(now, MAX_SEND_BATCH)) {
+            if (intent.materializedAt != null) continue
+            val content = runCatching {
+                json.decodeFromString(SecureContent.serializer(), intent.contentJson)
+            }.getOrNull()
+            if (content == null) {
+                intentDao.delete(intent.id)
+                failIfNothingQueued(intent.clientId, "This queued message could not be restored")
+                continue
+            }
+            val conversation = conversationDao.get(intent.conversationId)
+            if (conversation == null) {
+                intentDao.delete(intent.id)
+                failIfNothingQueued(intent.clientId, "The conversation for this message no longer exists")
+                continue
+            }
+            try {
+                val targets = resolveConversationTargets(conversation)
+                if (targets.isEmpty()) {
+                    scheduleIntent(intent, "No active encrypted device is available yet", now)
+                    continue
+                }
+                // Deterministic row IDs make this idempotent. If the process
+                // dies after encryption but before the intent is marked, the
+                // retry replaces the same outbox rows instead of duplicating.
+                buildOutboxRows(intent, content, targets, now).forEach { outboxDao.upsert(it) }
+                intentDao.markMaterialized(intent.id, now)
+                messageDao.clearError(intent.clientId)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: IdentityChangedException) {
+                conversation.peerNexId?.let { contactDao.setVerified(it, null) }
+                intentDao.delete(intent.id)
+                failIfNothingQueued(intent.clientId, friendlyError(error))
+                _events.tryEmit(
+                    ChatEvent.Security(
+                        conversation.peerNexId ?: intent.clientId,
+                        "The safety number for this contact changed. Verify it, then reset the security session from the contact screen.",
+                    ),
+                )
+            } catch (error: Exception) {
+                if (isPermanentSendError(error)) {
+                    intentDao.delete(intent.id)
+                    failIfNothingQueued(intent.clientId, friendlyError(error))
+                } else {
+                    scheduleIntent(intent, friendlyError(error), now)
+                }
             }
         }
     }
 
+    private suspend fun buildOutboxRows(
+        intent: PendingIntentEntity,
+        content: SecureContent,
+        targets: List<Target>,
+        now: Long,
+    ): List<OutboxEntity> {
+        val ttl = ttlFor(content.kind)
+        val rows = mutableListOf<OutboxEntity>()
+        for (target in targets) {
+            val payload = crypto.encrypt(content, target.nexId, target.signalDeviceId, target.bundle)
+            rows += OutboxEntity(
+                id = "${intent.id}:${target.nexId}:${target.signalDeviceId}",
+                clientId = intent.clientId,
+                conversationId = intent.conversationId,
+                recipientNexId = target.nexId,
+                recipientSignalDeviceId = target.signalDeviceId,
+                groupId = content.groupId,
+                cipherType = payload.cipherType,
+                ciphertext = payload.ciphertext,
+                ephemeral = false,
+                createdAt = now,
+                expiresAt = now + ttl,
+            )
+        }
+        return rows
+    }
+
+    private suspend fun dispatchOutbox(now: Long): Boolean {
+        val pending = outboxDao.due(now, MAX_SEND_BATCH)
+        if (pending.isEmpty()) {
+            cleanupMaterializedIntents()
+            return true
+        }
+        val outgoing = pending.map {
+            OutgoingEnvelope(
+                recipientNexId = it.recipientNexId,
+                recipientSignalDeviceId = it.recipientSignalDeviceId,
+                clientId = it.clientId,
+                ciphertext = it.ciphertext,
+                cipherType = it.cipherType,
+                ephemeral = it.ephemeral,
+                expiresInSeconds = (((it.expiresAt - now) / 1000L)
+                    .coerceIn(10L, MAX_ENVELOPE_TTL_SECONDS)).toInt(),
+                groupId = it.groupId,
+            )
+        }
+        val response = try {
+            api.sendEnvelopes(outgoing)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Throwable) {
+            if (isPermanentDeliveryError(error)) {
+                // The relay refused the payload itself (not an outage), so
+                // retrying the identical ciphertext can never succeed.
+                for (clientId in pending.map { it.clientId }.distinct()) {
+                    outboxDao.deleteForClient(clientId)
+                    intentDao.deleteForClient(clientId)
+                    failMessage(clientId, sendFailureMessage(error))
+                }
+            } else {
+                scheduleOutboxRetry(pending, error, now)
+            }
+            if (error is SessionExpiredException) throw error
+            return false
+        }
+
+        val acceptedKeys = response.accepted.associateBy {
+            it.clientId to canonicalSignalDeviceId(it.recipientSignalDeviceId)
+        }
+        val skippedKeys = response.skipped.mapNotNull { skip ->
+            skip.recipientSignalDeviceId?.let {
+                skip.clientId to canonicalSignalDeviceId(it)
+            }
+        }.toSet()
+        val affected = linkedSetOf<String>()
+
+        for (row in pending) {
+            affected += row.clientId
+            val accepted = acceptedKeys[
+                row.clientId to canonicalSignalDeviceId(row.recipientSignalDeviceId),
+            ] ?: continue
+            outboxDao.delete(row.id)
+            parseTimestamp(accepted.deliveredAt)?.let { deliveredAt ->
+                messageDao.markDelivered(row.clientId, deliveredAt)
+            }
+        }
+
+        var failed = false
+        val acceptedClients = response.accepted.map { it.clientId }.toSet()
+        for (skip in response.skipped.distinctBy {
+            it.clientId to it.recipientSignalDeviceId
+        }) {
+            affected += skip.clientId
+            val deviceKey = skip.recipientSignalDeviceId?.let(::canonicalSignalDeviceId)
+            val rows = outboxDao.forClient(skip.clientId).filter {
+                deviceKey == null ||
+                    canonicalSignalDeviceId(it.recipientSignalDeviceId) == deviceKey
+            }
+            when (skip.reason) {
+                "DEVICE_NOT_ACTIVE" -> {
+                    // The contact reinstalled or replaced that device. Drop the
+                    // stale ciphertext, refresh the device list and encrypt a
+                    // fresh copy for the replacement on the next attempt.
+                    if (rows.isNotEmpty()) {
+                        rows.forEach { outboxDao.delete(it.id) }
+                        rows.map { it.recipientNexId }.distinct().forEach {
+                            invalidateDeviceCache(it)
+                        }
+                        intentDao.reopen(skip.clientId)
+                    }
+                }
+                "GROUP_NOT_FOUND",
+                "NOT_A_GROUP_MEMBER",
+                -> {
+                    // The whole group send is invalid, not just one member.
+                    outboxDao.deleteForClient(skip.clientId)
+                    intentDao.deleteForClient(skip.clientId)
+                    failMessage(skip.clientId, skipReason(skip.reason))
+                    failed = true
+                }
+                "RECIPIENT_NOT_FOUND",
+                "RECIPIENT_NOT_IN_GROUP",
+                -> {
+                    // Drop only the unreachable member. If nobody accepted
+                    // this message it is genuinely failed; for a group the
+                    // remaining members may already have received it.
+                    rows.forEach { outboxDao.delete(it.id) }
+                    if (skip.clientId !in acceptedClients) {
+                        failMessage(skip.clientId, skipReason(skip.reason))
+                        failed = true
+                    }
+                }
+                else -> {
+                    rows.forEach { row ->
+                        outboxDao.markAttempt(
+                            row.id,
+                            now,
+                            now + retryDelay(row.attempts + 1),
+                            skipReason(skip.reason),
+                        )
+                    }
+                }
+            }
+        }
+
+        // A response that omits a row is not an acceptance. Keep the ciphertext
+        // and retry rather than showing a fake SENT status.
+        for (row in pending) {
+            val key = row.clientId to canonicalSignalDeviceId(row.recipientSignalDeviceId)
+            if (key in acceptedKeys || key in skippedKeys) continue
+            affected += row.clientId
+            outboxDao.markAttempt(
+                row.id,
+                now,
+                now + retryDelay(row.attempts + 1),
+                "The relay did not confirm this message",
+            )
+        }
+
+        cleanupMaterializedIntents()
+
+        for (clientId in affected) {
+            if (!hasQueuedSend(clientId)) {
+                messageDao.markSent(clientId)
+                messageDao.clearError(clientId)
+            }
+        }
+        return !failed
+    }
+
+    private suspend fun scheduleOutboxRetry(
+        rows: List<OutboxEntity>,
+        error: Throwable,
+        now: Long,
+    ) {
+        val message = sendFailureMessage(error)
+        for (row in rows) {
+            outboxDao.markAttempt(
+                row.id,
+                now,
+                now + retryDelay(row.attempts + 1),
+                message,
+            )
+        }
+        for (clientId in rows.map { it.clientId }.distinct()) {
+            messageDao.setError(clientId, message)
+        }
+    }
+
+    private suspend fun scheduleIntent(intent: PendingIntentEntity, message: String, now: Long) {
+        intentDao.markAttempt(
+            intent.id,
+            now,
+            now + retryDelay(intent.attempts + 1),
+            message,
+        )
+        messageDao.setError(intent.clientId, message)
+    }
+
+    private suspend fun cleanupMaterializedIntents() {
+        for (intent in intentDao.materializedWithoutOutbox()) {
+            intentDao.delete(intent.id)
+        }
+    }
+
+    private suspend fun hasQueuedSend(clientId: String): Boolean =
+        outboxDao.countForClient(clientId) > 0 || intentDao.countForClient(clientId) > 0
+
+    private suspend fun failIfNothingQueued(clientId: String, message: String) {
+        if (!hasQueuedSend(clientId)) failMessage(clientId, message)
+    }
+
+    private suspend fun failMessage(clientId: String, message: String) {
+        messageDao.updateStatus(clientId, MessageStatus.FAILED, System.currentTimeMillis())
+        messageDao.setError(clientId, message)
+    }
+
+    private fun isPermanentSendError(error: Throwable): Boolean =
+        error is ApiException && error.code in setOf(
+            "RECIPIENT_NOT_FOUND",
+            "USER_NOT_FOUND",
+            "NOT_A_GROUP_MEMBER",
+            "RECIPIENT_NOT_IN_GROUP",
+            "GROUP_NOT_FOUND",
+            "NO_SERVER",
+            "INSECURE_SERVER",
+        )
+
+    private fun isPermanentDeliveryError(error: Throwable): Boolean =
+        isPermanentSendError(error) ||
+            (error is ApiException && error.statusCode in setOf(400, 413, 415, 422))
+
+    private fun retryDelay(attempts: Int): Long {
+        val exponent = (attempts - 1).coerceIn(0, 10)
+        return (RETRY_BASE_MILLIS shl exponent).coerceAtMost(RETRY_MAX_MILLIS)
+    }
+
+    private fun ttlFor(kind: String): Long = when (kind) {
+        ContentKind.CALL_OFFER,
+        ContentKind.CALL_ANSWER,
+        ContentKind.CALL_ICE,
+        ContentKind.CALL_HANGUP,
+        ContentKind.CALL_REJECT,
+        -> CALL_SIGNAL_TTL_MILLIS
+        else -> MESSAGE_TTL_MILLIS
+    }
+
+    private fun parseTimestamp(raw: String?): Long? =
+        raw?.takeIf { it.isNotBlank() }?.let {
+            runCatching { Instant.parse(it).toEpochMilli() }.getOrNull()
+        }
+
     private fun sendFailureMessage(error: Throwable?): String = when {
         error is SessionExpiredException -> error.message ?: "Your session expired. Sign in again."
         error is ApiException && error.code == "EPHEMERAL_TARGET_OFFLINE" ->
-            "The recipient is offline. NEXCHAT only delivers while both of you are online."
-        error is ApiException -> error.message ?: "The server rejected the message"
-        error is IOException -> "You appear to be offline. Connect to the internet and send again."
-        else -> "The message could not be sent. Check your connection and try again."
+            "The recipient is offline."
+        error is ApiException && error.code != "HTTP_0" -> error.message ?: "The server rejected the message"
+        error is IOException ->
+            "You're offline. NEXCHAT will send this automatically when the connection returns."
+        else -> "Waiting to send. NEXCHAT will retry automatically."
     }
 
     suspend fun onConnected() = withContext(Dispatchers.IO) {
         runCatching { syncGroups() }
-        runCatching { abandonQueuedSends() }
+        runCatching { fetchReceipts() }
         runCatching { receivePending() }
+        runCatching { flushOutbox() }
         runCatching { replenishPreKeysIfNeeded() }
     }
 
     /**
      * Fallback sync used while the socket is connected. Serverless relays can
      * place a sender and recipient on different instances, so a realtime push
-     * is best-effort. This ensures queued ciphertext is still fetched.
+     * is best-effort. This also drives the automatic retry loop for messages
+     * composed while offline.
      */
     suspend fun pollPending() = withContext(Dispatchers.IO) {
         runCatching { receivePending() }
+        runCatching { fetchReceipts() }
+        runCatching { flushOutbox() }
         // Replenish even while the socket stays open. A recipient that remains
         // connected would otherwise never publish new one-time prekeys.
         runCatching { replenishPreKeysIfNeeded() }
@@ -585,9 +830,18 @@ class ChatRepository(
         upsertSender(senderNexId, content)
         when (content.kind) {
             ContentKind.TEXT -> handleIncomingText(envelope, content, senderNexId)
-            ContentKind.EDIT -> content.targetClientId?.let { messageDao.applyEdit(it, content.text.orEmpty(), System.currentTimeMillis()) }
+            ContentKind.EDIT -> content.targetClientId?.let {
+                messageDao.applyEdit(
+                    it,
+                    content.text.orEmpty(),
+                    content.timestamp.takeIf { time -> time > 0 } ?: System.currentTimeMillis(),
+                )
+            }
             ContentKind.DELETE -> content.targetClientId?.let {
-                messageDao.applyDeleteForEveryone(it, System.currentTimeMillis())
+                messageDao.applyDeleteForEveryone(
+                    it,
+                    content.timestamp.takeIf { time -> time > 0 } ?: System.currentTimeMillis(),
+                )
             }
             ContentKind.REACTION -> handleReaction(content, senderNexId)
             ContentKind.READ -> {
@@ -728,6 +982,12 @@ class ChatRepository(
         val body = content.text.orEmpty()
         if (body.isBlank()) return
         val now = System.currentTimeMillis()
+        // Preserve the sender's original composition time. A message that sat
+        // in the relay while this device was offline must keep its place in
+        // the timeline instead of jumping to "now" when it is finally fetched.
+        val sentAt = content.timestamp.takeIf { it > 0 }
+            ?: parseTimestamp(envelope.createdAt)
+            ?: now
         val message = MessageEntity(
             id = messageId,
             conversationId = conversation.id,
@@ -736,17 +996,20 @@ class ChatRepository(
             outgoing = false,
             body = body,
             status = MessageStatus.DELIVERED,
-            sentAt = now,
+            sentAt = sentAt,
             receivedAt = now,
             replyToId = content.replyToId,
             replyToPreview = content.replyPreview,
         )
         val inserted = messageDao.insertIgnore(message)
         if (inserted == -1L) return
-        conversationDao.touch(
+        // Delayed envelopes must not move the conversation backwards. When the
+        // timestamps tie, the message that actually arrived last owns the
+        // preview.
+        conversationDao.touchIfNewer(
             conversation.id,
             previewForMessage(body, conversation.type == "GROUP"),
-            now,
+            sentAt,
         )
         if (_activeConversation.value != conversation.id) {
             conversationDao.incrementUnread(conversation.id, now)
@@ -1044,9 +1307,7 @@ class ChatRepository(
     }
 
     private suspend fun sendControl(conversation: ConversationEntity, content: SecureContent) {
-        val targets = resolveConversationTargets(conversation)
-        if (targets.isEmpty()) throw CryptoException("No active encrypted device is available")
-        enqueue(conversation, content, targets)
+        enqueueIntent(conversation, content)
         flushOutbox()
     }
 
@@ -1140,7 +1401,7 @@ class ChatRepository(
         }
 
         val targets = mutableListOf<Target>()
-        for (device in current.filter { it.signalDeviceId in known }) {
+        for (device in current.filter { canonicalSignalDeviceId(it.signalDeviceId) in known }) {
             // The server device list is authoritative. If the public identity key
             // no longer matches the key bound to our session, stop before sending
             // and require the user to verify the contact's new safety number.
@@ -1150,7 +1411,7 @@ class ChatRepository(
             }
             targets += Target(nexId, device.signalDeviceId, null)
         }
-        val missing = current.filterNot { it.signalDeviceId in known }
+        val missing = current.filterNot { canonicalSignalDeviceId(it.signalDeviceId) in known }
         if (missing.isNotEmpty()) {
             // Only unknown devices consume a one-time prekey. Known sessions stay
             // on their existing ratchet and do not burn the contact's key pool.
@@ -1196,37 +1457,25 @@ class ChatRepository(
         deviceCacheMutex.withLock { deviceCache.remove(nexId) }
     }
 
-    private suspend fun enqueue(conversation: ConversationEntity, content: SecureContent, targets: List<Target>) {
-        val encrypted = mutableListOf<OutboxEntity>()
+    /**
+     * Stores the send intent in SQLCipher. The encrypted content cannot be
+     * produced until the recipient's current device bundle is reachable, so
+     * this is what survives an offline composition or a process kill.
+     */
+    private suspend fun enqueueIntent(conversation: ConversationEntity, content: SecureContent) {
         val now = System.currentTimeMillis()
-        // A call signal is only useful while the call is ringing. Do not let a
-        // queued offer or ICE candidate survive for days on the relay.
-        val ttlMillis = when (content.kind) {
-            ContentKind.CALL_OFFER,
-            ContentKind.CALL_ANSWER,
-            ContentKind.CALL_ICE,
-            ContentKind.CALL_HANGUP,
-            ContentKind.CALL_REJECT,
-            -> CALL_SIGNAL_TTL_MILLIS
-            else -> MESSAGE_TTL_MILLIS
-        }
-        for (target in targets) {
-            val payload = crypto.encrypt(content, target.nexId, target.signalDeviceId, target.bundle)
-            encrypted += OutboxEntity(
+        val clientId = content.clientId ?: UUID.randomUUID().toString()
+        intentDao.upsert(
+            PendingIntentEntity(
                 id = UUID.randomUUID().toString(),
-                clientId = content.clientId ?: UUID.randomUUID().toString(),
+                clientId = clientId,
                 conversationId = conversation.id,
-                recipientNexId = target.nexId,
-                recipientSignalDeviceId = target.signalDeviceId,
-                groupId = content.groupId,
-                cipherType = payload.cipherType,
-                ciphertext = payload.ciphertext,
-                ephemeral = false,
+                contentJson = json.encodeToString(SecureContent.serializer(), content),
+                durable = true,
                 createdAt = now,
-                expiresAt = now + ttlMillis,
-            )
-        }
-        encrypted.forEach { outboxDao.upsert(it) }
+                expiresAt = now + ttlFor(content.kind),
+            ),
+        )
     }
 
     private suspend fun encryptAndSendEphemeral(
@@ -1339,10 +1588,11 @@ class ChatRepository(
         }
     }
 
-    suspend fun markDelivered(clientId: String) = withContext(Dispatchers.IO) {
-        messageDao.markDelivered(clientId, System.currentTimeMillis())
-        _events.tryEmit(ChatEvent.Delivery(clientId))
-    }
+    suspend fun markDelivered(clientId: String, at: Long = System.currentTimeMillis()) =
+        withContext(Dispatchers.IO) {
+            messageDao.markDelivered(clientId, at)
+            _events.tryEmit(ChatEvent.Delivery(clientId))
+        }
 
     suspend fun markConversationArchived(id: String, archived: Boolean) =
         withContext(Dispatchers.IO) { conversationDao.setArchived(id, archived) }
@@ -1464,7 +1714,9 @@ private val reactionsSerializer = MapSerializer(
 
 private const val DEVICE_CACHE_MILLIS = 60_000L
 private const val PRE_KEY_CHECK_INTERVAL_MILLIS = 60_000L
-private const val STALE_OUTBOX_MILLIS = 60_000L
+private const val MAX_SEND_BATCH = 100
+private const val RETRY_BASE_MILLIS = 5_000L
+private const val RETRY_MAX_MILLIS = 15L * 60 * 1000
 private const val MAX_ENVELOPE_TTL_SECONDS = 7L * 24 * 3600
 private const val MESSAGE_TTL_MILLIS = MAX_ENVELOPE_TTL_SECONDS * 1000L
 private const val CALL_SIGNAL_TTL_MILLIS = 3L * 60 * 1000

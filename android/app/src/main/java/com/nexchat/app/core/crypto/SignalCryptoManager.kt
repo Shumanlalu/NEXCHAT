@@ -40,7 +40,7 @@ class SignalCryptoManager(
     private val store: NexSignalStore,
     private val json: Json = Json {
         ignoreUnknownKeys = true
-        encodeDefaults = false
+        encodeDefaults = true
         explicitNulls = false
     },
 ) {
@@ -48,6 +48,15 @@ class SignalCryptoManager(
 
     suspend fun ensureInitialized(): UploadKeyBatch? = withContext(Dispatchers.IO) {
         cryptoMutex.withLock { store.initializeIdentityIfNeeded() }
+    }
+
+    /**
+     * Switches the local protocol address to the relay's authoritative ID.
+     * Existing pairwise sessions are dropped by the store because they are
+     * bound to the previous address.
+     */
+    suspend fun adoptSignalDeviceId(newId: Int): Boolean = withContext(Dispatchers.IO) {
+        cryptoMutex.withLock { store.adoptSignalDeviceId(newId) }
     }
 
     suspend fun deviceIdentity(): NexSignalStore.LocalDeviceIdentity = withContext(Dispatchers.IO) {
@@ -80,17 +89,18 @@ class SignalCryptoManager(
     ): EncryptedPayload = withContext(Dispatchers.IO) {
         cryptoMutex.withLock {
             store.initialize()
-            if (bundle != null && bundle.signalDeviceId != signalDeviceId) {
+            val protocolDeviceId = canonicalSignalDeviceId(signalDeviceId)
+            if (bundle != null && canonicalSignalDeviceId(bundle.signalDeviceId) != protocolDeviceId) {
                 throw CryptoException("Encryption bundle did not match the target device")
             }
-            val address = SignalProtocolAddress(peerNexId, signalDeviceId)
+            val address = SignalProtocolAddress(peerNexId, protocolDeviceId)
             if (!store.containsSession(address)) {
                 val required = bundle ?: throw CryptoException("No prekey bundle available for $peerNexId")
                 val oneTimeKeyId = required.oneTimePreKeyId ?: PreKeyBundle.NULL_PRE_KEY_ID
                 val oneTimeKey = required.oneTimePreKeyPublic?.let { ECPublicKey(decode(it)) }
                 val preKeyBundle = PreKeyBundle(
                     required.registrationId,
-                    required.signalDeviceId,
+                    protocolDeviceId,
                     oneTimeKeyId,
                     oneTimeKey,
                     required.signedPreKeyId,
@@ -120,7 +130,10 @@ class SignalCryptoManager(
     suspend fun decrypt(envelope: EnvelopeDto): SecureContent = withContext(Dispatchers.IO) {
         cryptoMutex.withLock {
             store.initialize()
-            val address = SignalProtocolAddress(envelope.senderNexId, envelope.senderSignalDeviceId)
+            val address = SignalProtocolAddress(
+                envelope.senderNexId,
+                canonicalSignalDeviceId(envelope.senderSignalDeviceId),
+            )
             val cipher = SessionCipher(store, address)
             val bytes = Base64.decode(envelope.ciphertext, Base64.NO_WRAP)
             val plaintext = try {

@@ -54,9 +54,64 @@ export class Database {
     try {
       await client.query("SELECT pg_advisory_lock(741852963)");
       await client.query(schema);
+      await this.repairSignalDeviceIds(client);
     } finally {
       await client.query("SELECT pg_advisory_unlock(741852963)").catch(() => undefined);
       client.release();
+    }
+  }
+
+  /**
+   * Device rows created before the libsignal device-ID limit was enforced can
+   * contain values outside 1..127. libsignal cannot construct a protocol
+   * address for those rows, which makes calls and messages fail for every
+   * peer. Rewrite them once, assigning the lowest free ID per account.
+   */
+  private async repairSignalDeviceIds(client: PoolClient): Promise<void> {
+    const invalid = await client.query<{
+      id: string;
+      user_id: string;
+      signal_device_id: number;
+    }>(
+      `SELECT id, user_id, signal_device_id FROM devices
+       WHERE revoked_at IS NULL AND (signal_device_id < 1 OR signal_device_id > 127)
+       ORDER BY user_id, created_at`,
+    );
+    if (invalid.rows.length === 0) return;
+
+    const valid = await client.query<{ user_id: string; signal_device_id: number }>(
+      `SELECT user_id, signal_device_id FROM devices
+       WHERE revoked_at IS NULL AND signal_device_id BETWEEN 1 AND 127`,
+    );
+    const used = new Map<string, Set<number>>();
+    for (const row of valid.rows) {
+      let ids = used.get(row.user_id);
+      if (!ids) {
+        ids = new Set();
+        used.set(row.user_id, ids);
+      }
+      ids.add(row.signal_device_id);
+    }
+
+    for (const row of invalid.rows) {
+      let ids = used.get(row.user_id);
+      if (!ids) {
+        ids = new Set();
+        used.set(row.user_id, ids);
+      }
+      let assigned = 0;
+      for (let id = 1; id <= 127; id += 1) {
+        if (!ids.has(id)) {
+          assigned = id;
+          break;
+        }
+      }
+      if (assigned === 0) continue;
+      await client.query(
+        "UPDATE devices SET signal_device_id = $1 WHERE id = $2",
+        [assigned, row.id],
+      );
+      ids.add(assigned);
     }
   }
 

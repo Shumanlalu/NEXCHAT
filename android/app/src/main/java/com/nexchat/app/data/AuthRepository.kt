@@ -2,6 +2,8 @@ package com.nexchat.app.data
 
 import androidx.room.withTransaction
 import com.nexchat.app.core.crypto.SignalCryptoManager
+import com.nexchat.app.core.crypto.MAX_SIGNAL_DEVICE_ID
+import com.nexchat.app.core.crypto.MIN_SIGNAL_DEVICE_ID
 import com.nexchat.app.core.db.NexDatabase
 import com.nexchat.app.core.db.ProfileEntity
 import com.nexchat.app.core.network.ApiClient
@@ -51,6 +53,7 @@ class AuthRepository(
         try {
             val me = api.me()
             val identity = crypto.deviceIdentity()
+            val signalDeviceId = syncSignalDeviceId(me.device.signalDeviceId)
             val profile = ProfileEntity(
                 userId = me.user.id,
                 nexId = me.user.nexId,
@@ -58,7 +61,7 @@ class AuthRepository(
                 displayName = me.user.displayName,
                 avatar = me.user.avatar,
                 deviceId = me.device.id,
-                signalDeviceId = me.device.signalDeviceId,
+                signalDeviceId = signalDeviceId,
                 registrationId = identity.registrationId,
                 createdAt = System.currentTimeMillis(),
             )
@@ -88,6 +91,7 @@ class AuthRepository(
             db.groupDao().deleteAllMembersEverywhere()
             db.groupDao().deleteAll()
             db.outboxDao().deleteAll()
+            db.pendingIntentDao().deleteAll()
             db.relayDao().deleteAll()
             db.processedEnvelopeDao().deleteAll()
             db.callHistoryDao().deleteAll()
@@ -166,6 +170,7 @@ class AuthRepository(
         tokens.saveTokens(response.token, response.refreshToken)
         settings.update { it.copy(onboardingCompleted = true) }
         val identity = crypto.deviceIdentity()
+        val signalDeviceId = syncSignalDeviceId(response.device.signalDeviceId)
         val profile = ProfileEntity(
             userId = response.user.id,
             nexId = response.user.nexId,
@@ -173,7 +178,7 @@ class AuthRepository(
             displayName = response.user.displayName,
             avatar = response.user.avatar,
             deviceId = response.device.id,
-            signalDeviceId = response.device.signalDeviceId,
+            signalDeviceId = signalDeviceId,
             registrationId = identity.registrationId,
             createdAt = System.currentTimeMillis(),
         )
@@ -191,15 +196,37 @@ class AuthRepository(
     suspend fun refreshProfile() = withContext(Dispatchers.IO) {
         val me = api.me()
         val current = profileDao.get() ?: return@withContext
+        val signalDeviceId = syncSignalDeviceId(me.device.signalDeviceId)
         val profile = current.copy(
             displayName = me.user.displayName,
             avatar = me.user.avatar,
             username = me.user.username,
             deviceId = me.device.id,
-            signalDeviceId = me.device.signalDeviceId,
+            signalDeviceId = signalDeviceId,
         )
         profileDao.upsert(profile)
         _state.value = AuthState.LoggedIn(profile)
+    }
+
+    /**
+     * The relay's device ID is authoritative. Legacy rows can contain a 32-bit
+     * ID that libsignal cannot address, so move to a valid ID instead of
+     * writing it back on the next login.
+     */
+    private suspend fun syncSignalDeviceId(serverId: Int): Int {
+        val local = crypto.deviceIdentity()
+        if (serverId in MIN_SIGNAL_DEVICE_ID..MAX_SIGNAL_DEVICE_ID) {
+            if (local.signalDeviceId != serverId) {
+                crypto.adoptSignalDeviceId(serverId)
+            }
+            return serverId
+        }
+        val repaired = runCatching { api.setSignalDeviceId(local.signalDeviceId) }.getOrNull()
+        if (repaired != null) {
+            crypto.adoptSignalDeviceId(repaired.signalDeviceId)
+            return repaired.signalDeviceId
+        }
+        return local.signalDeviceId
     }
 
     suspend fun updateProfile(displayName: String) = withContext(Dispatchers.IO) {

@@ -19,12 +19,51 @@ export interface AuthDeps {
   hub: WsHub;
 }
 
+const MIN_SIGNAL_DEVICE_ID = 1;
+const MAX_SIGNAL_DEVICE_ID = 127;
+
+function isValidSignalDeviceId(id: number): boolean {
+  return Number.isInteger(id) && id >= MIN_SIGNAL_DEVICE_ID && id <= MAX_SIGNAL_DEVICE_ID;
+}
+
+/**
+ * libsignal only accepts device IDs 1..127. Older Android builds generated
+ * 32-bit IDs, so normalize anything outside that range (or colliding with a
+ * sibling device) to the lowest free value before it is stored.
+ */
+async function resolveSignalDeviceId(
+  db: Database,
+  userId: string,
+  requested: number,
+  ownDeviceId: string,
+): Promise<number> {
+  const rows = await db.query<{ signal_device_id: number }>(
+    `SELECT signal_device_id FROM devices
+     WHERE user_id = $1 AND revoked_at IS NULL AND id <> $2`,
+    [userId, ownDeviceId],
+  );
+  const used = new Set(
+    rows.map((row) => row.signal_device_id).filter(isValidSignalDeviceId),
+  );
+  if (isValidSignalDeviceId(requested) && !used.has(requested)) return requested;
+  for (let id = MIN_SIGNAL_DEVICE_ID; id <= MAX_SIGNAL_DEVICE_ID; id += 1) {
+    if (!used.has(id)) return id;
+  }
+  throw new HttpError(409, "NO_DEVICE_ID_AVAILABLE", "This account has too many active devices");
+}
+
 async function insertDevice(
   db: Database,
   userId: string,
   device: DeviceInput,
   allowReplace = false,
 ): Promise<void> {
+  const signalDeviceId = await resolveSignalDeviceId(
+    db,
+    userId,
+    device.signalDeviceId,
+    device.deviceId,
+  );
   const existing = await db.one<{ id: string; user_id: string }>(
     "SELECT id, user_id FROM devices WHERE id = $1",
     [device.deviceId],
@@ -49,7 +88,7 @@ async function insertDevice(
           device.name,
           device.platform ?? "android",
           device.registrationId,
-          device.signalDeviceId,
+          signalDeviceId,
           device.identityKey,
           device.signedPreKeyId,
           device.signedPreKeyPublic,
@@ -91,7 +130,7 @@ async function insertDevice(
         device.name,
         device.platform ?? "android",
         device.registrationId,
-        device.signalDeviceId,
+        signalDeviceId,
         device.identityKey,
         device.signedPreKeyId,
         device.signedPreKeyPublic,
@@ -355,4 +394,4 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): 
   });
 }
 
-export { insertDevice, issueSession, publicProfile };
+export { insertDevice, issueSession, publicProfile, resolveSignalDeviceId };

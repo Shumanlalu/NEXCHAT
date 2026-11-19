@@ -4,7 +4,8 @@ import type { Database } from "../db";
 import { HttpError, requireAuth, type DeviceRow, type UserRow } from "../http";
 import { publicUser } from "../security/ids";
 import type { TokenService } from "../security/tokens";
-import { parseWith, rotateKeysSchema, updateProfileSchema } from "../validation";
+import { parseWith, rotateKeysSchema, signalDeviceIdSchema, updateProfileSchema } from "../validation";
+import { resolveSignalDeviceId } from "./auth";
 
 interface Deps {
   db: Database;
@@ -217,6 +218,29 @@ export async function registerUserRoutes(app: FastifyInstance, deps: Deps): Prom
     });
 
     return reply.send({ ok: true });
+  });
+
+  app.post("/v1/devices/signal-id", async (request, reply) => {
+    const auth = await requireAuth(request, db, tokens);
+    const body = parseWith(signalDeviceIdSchema, request.body ?? {});
+    const signalDeviceId = await resolveSignalDeviceId(
+      db,
+      auth.user.id,
+      body.signalDeviceId ?? 0,
+      auth.device.id,
+    );
+    try {
+      await db.query(
+        "UPDATE devices SET signal_device_id = $1 WHERE id = $2 AND user_id = $3",
+        [signalDeviceId, auth.device.id, auth.user.id],
+      );
+    } catch (error) {
+      if ((error as { code?: string }).code === "23505") {
+        throw new HttpError(409, "DEVICE_ID_CONFLICT", "That device ID is already in use");
+      }
+      throw error;
+    }
+    return reply.send({ signalDeviceId });
   });
 }
 

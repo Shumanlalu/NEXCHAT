@@ -18,9 +18,9 @@ class MessagingService : Service() {
             container.notifications.serviceNotification(),
             ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING,
         )
-        // Sending is online-only, so this service never retries the outbox.
-        // It keeps the authenticated socket (and the periodic receive poll)
-        // alive while NEXCHAT is running.
+        // The socket poller drives automatic outbox retry, delivery-receipt
+        // sync and incoming-envelope fetch every few seconds while NEXCHAT is
+        // running. WorkManager covers the process-killed case separately.
         container.websocket.start()
     }
 

@@ -174,6 +174,12 @@ data class RotateKeysRequest(
 data class PreKeyCountResponse(val oneTimePreKeys: Int, val kyberPreKeys: Int)
 
 @Serializable
+data class SignalDeviceIdRequest(val signalDeviceId: Int? = null)
+
+@Serializable
+data class SignalDeviceIdResponse(val signalDeviceId: Int)
+
+@Serializable
 data class EnvelopeDto(
     val id: String,
     val senderNexId: String,
@@ -215,16 +221,36 @@ data class AcceptedEnvelope(
     val recipientDeviceId: String = "",
     val envelopeId: String,
     val createdAt: String,
+    val deliveredAt: String? = null,
 )
 
 @Serializable
-data class SkippedEnvelope(val clientId: String, val reason: String)
+data class SkippedEnvelope(
+    val clientId: String,
+    val reason: String,
+    val recipientSignalDeviceId: Int? = null,
+)
 
 @Serializable
 data class SendMessagesResponse(
     val accepted: List<AcceptedEnvelope> = emptyList(),
     val skipped: List<SkippedEnvelope> = emptyList(),
 )
+
+@Serializable
+data class DeliveryReceiptDto(
+    val id: String,
+    val clientId: String,
+    val envelopeId: String = "",
+    val recipientDeviceId: String = "",
+    val deliveredAt: String = "",
+)
+
+@Serializable
+data class DeliveryReceiptsResponse(val receipts: List<DeliveryReceiptDto> = emptyList())
+
+@Serializable
+data class ReceiptAckRequest(val receiptIds: List<String>)
 
 @Serializable
 data class AckRequest(val envelopeIds: List<String>)
