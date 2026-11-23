@@ -69,6 +69,7 @@ import com.nexchat.app.ui.components.StatusPill
 import com.nexchat.app.ui.encodeAvatar
 import com.nexchat.app.ui.nexViewModel
 import com.nexchat.app.ui.theme.LocalNexPalette
+import com.nexchat.app.ui.theme.atSize
 import com.nexchat.app.ui.viewmodel.SettingsViewModel
 import java.time.Instant
 import java.time.ZoneId
@@ -168,15 +169,17 @@ fun ProfileScreen(onBack: () -> Unit) {
                 ) {
                     Text(
                         "NEX ID",
-                        style = MaterialTheme.typography.labelMedium.copy(letterSpacing = 1.8.sp, fontSize = 10.sp),
+                        style = MaterialTheme.typography.labelSmall.atSize(11.sp).copy(letterSpacing = 0.4.sp),
                         color = palette.textMuted,
                     )
                     Spacer(Modifier.height(6.dp))
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
                             profile?.nexId ?: "—",
-                            style = MaterialTheme.typography.titleLarge.copy(letterSpacing = 1.4.sp),
+                            style = MaterialTheme.typography.titleLarge,
                             color = palette.textPrimary,
+                            maxLines = 1,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f),
                         )
                         Icon(
@@ -319,14 +322,15 @@ private fun ProfileFact(label: String, value: String) {
             label,
             style = MaterialTheme.typography.bodySmall,
             color = palette.textMuted,
-            modifier = Modifier.width(112.dp),
+            modifier = Modifier.weight(0.4f),
+            maxLines = 2,
         )
         Text(
             value,
             style = MaterialTheme.typography.bodySmall,
             color = palette.textSecondary,
-            fontWeight = FontWeight.Medium,
-            maxLines = 1,
+            modifier = Modifier.weight(0.6f),
+            maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )
     }
@@ -430,7 +434,7 @@ fun DevicesScreen(onBack: () -> Unit) {
                                     )
                                     Text(
                                         "${device.platform} · added ${formatDeviceDate(device.createdAt)}",
-                                        style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
+                                        style = MaterialTheme.typography.bodySmall.atSize(11.sp),
                                         color = palette.textMuted,
                                     )
                                 }

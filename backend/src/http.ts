@@ -13,6 +13,8 @@ export interface UserRow {
   share_presence: boolean;
   created_at: Date | string;
   deleted_at: Date | string | null;
+  suspended_at?: Date | string | null;
+  suspended_reason?: string | null;
 }
 
 export interface DeviceRow {
@@ -45,6 +47,7 @@ export interface EnvelopeRow {
   cipher_type: number;
   ciphertext: string;
   ephemeral: boolean;
+  priority: boolean;
   created_at: Date | string;
   expires_at: Date | string;
   delivered_at: Date | string | null;
@@ -102,10 +105,13 @@ export async function requireAuth(
     device_created_at: Date | string;
     device_last_seen_at: Date | string | null;
     device_revoked_at: Date | string | null;
+    suspended_at: Date | string | null;
+    suspended_reason: string | null;
   };
   const rows = await db.query<AuthRow>(
     `SELECT u.id, u.nex_id, u.username, u.display_name, u.password_hash, u.password_salt,
             u.avatar, u.share_presence, u.created_at, u.deleted_at,
+            u.suspended_at, u.suspended_reason,
             d.id AS device_id, d.user_id AS device_user_id, d.name AS device_name,
             d.platform AS device_platform, d.registration_id AS device_registration_id,
             d.signal_device_id AS device_signal_device_id,
@@ -126,6 +132,25 @@ export async function requireAuth(
   if (!row) {
     throw new HttpError(401, "SESSION_REVOKED", "This session has been revoked");
   }
+  if (row.suspended_at) {
+    throw new HttpError(
+      403,
+      "ACCOUNT_SUSPENDED",
+      row.suspended_reason
+        ? `This account is suspended: ${row.suspended_reason}`
+        : "This account is suspended",
+    );
+  }
+
+  // Presence for the admin dashboard. The conditional predicate keeps this a
+  // no-op write for most requests while still refreshing at most every 2 min.
+  await db
+    .query(
+      `UPDATE devices SET last_seen_at = now()
+       WHERE id = $1 AND (last_seen_at IS NULL OR last_seen_at < now() - interval '2 minutes')`,
+      [row.device_id],
+    )
+    .catch(() => undefined);
 
   return {
     user: {
@@ -139,6 +164,8 @@ export async function requireAuth(
       share_presence: row.share_presence,
       created_at: row.created_at,
       deleted_at: row.deleted_at,
+      suspended_at: row.suspended_at,
+      suspended_reason: row.suspended_reason,
     },
     device: {
       id: row.device_id,

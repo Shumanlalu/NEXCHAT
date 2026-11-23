@@ -46,6 +46,9 @@ export class WsHub {
     });
     socket.on("close", () => this.remove(connection));
     socket.on("error", () => this.remove(connection));
+    // Authentication involves awaits. The client may have disconnected before
+    // we registered these listeners, so the "close" event was never observed.
+    if (socket.readyState !== socket.OPEN) this.remove(connection);
     return connection;
   }
 
@@ -83,6 +86,16 @@ export class WsHub {
     }
   }
 
+  closeUser(userId: string, code = 4001, reason = "session revoked"): void {
+    for (const connection of this.byUser.get(userId) ?? []) {
+      try {
+        connection.socket.close(code, reason);
+      } catch {
+        // The socket is already gone.
+      }
+    }
+  }
+
   closeAll(): void {
     for (const connections of this.byDevice.values()) {
       for (const connection of connections) {
@@ -100,9 +113,15 @@ export class WsHub {
     const text = JSON.stringify(message);
     let delivered = 0;
     for (const connection of connections) {
-      if (connection.socket.readyState === connection.socket.OPEN) {
+      if (connection.socket.readyState !== connection.socket.OPEN) continue;
+      try {
+        // The socket can close between the readyState check and send(). A
+        // throw here must not turn an already-committed envelope POST into a
+        // 500 and delay call signaling by a whole retry cycle.
         connection.socket.send(text);
         delivered += 1;
+      } catch {
+        // The durable queue and long poll remain the authoritative path.
       }
     }
     return delivered;

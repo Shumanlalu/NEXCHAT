@@ -23,6 +23,11 @@ const envSchema = z.object({
   ICE_SERVERS_JSON: z.string().default('[{"urls":["stun:stun.l.google.com:19302"]}]'),
   TRUST_PROXY: booleanString,
   LOG_LEVEL: z.string().default("info"),
+  // One-time bootstrap secret for the first administrator. Setup is disabled
+  // when this is empty, and permanently disabled once an admin exists.
+  ADMIN_SETUP_TOKEN: z.string().default(""),
+  ADMIN_SESSION_HOURS: z.coerce.number().int().min(1).max(72).default(12),
+  CRON_SECRET: z.string().default(""),
 });
 
 export type AppConfig = {
@@ -42,6 +47,9 @@ export type AppConfig = {
   iceServers: Array<Record<string, unknown>>;
   trustProxy: boolean;
   logLevel: string;
+  adminSetupToken?: string;
+  adminSessionHours?: number;
+  cronSecret?: string;
 };
 
 export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
@@ -78,6 +86,9 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     iceServers,
     trustProxy: parsed.TRUST_PROXY,
     logLevel: parsed.LOG_LEVEL,
+    adminSetupToken: parsed.ADMIN_SETUP_TOKEN,
+    adminSessionHours: parsed.ADMIN_SESSION_HOURS,
+    cronSecret: parsed.CRON_SECRET,
     ...overrides,
   };
 }

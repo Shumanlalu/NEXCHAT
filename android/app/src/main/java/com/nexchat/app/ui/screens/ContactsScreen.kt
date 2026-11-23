@@ -1,8 +1,7 @@
 package com.nexchat.app.ui.screens
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -15,8 +14,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Block
 import androidx.compose.material.icons.outlined.ChevronRight
@@ -24,7 +21,6 @@ import androidx.compose.material.icons.outlined.GroupAdd
 import androidx.compose.material.icons.outlined.People
 import androidx.compose.material.icons.outlined.PersonAdd
 import androidx.compose.material.icons.outlined.Search
-import androidx.compose.material.icons.outlined.Verified
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
@@ -38,17 +34,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nexchat.app.core.db.ContactEntity
-import com.nexchat.app.ui.components.Avatar
+import com.nexchat.app.ui.components.ContactListRow
 import com.nexchat.app.ui.components.EmptyState
-import com.nexchat.app.ui.components.GlassCard
 import com.nexchat.app.ui.components.GlassIconButton
 import com.nexchat.app.ui.components.GlassSearchField
 import com.nexchat.app.ui.components.ScreenTitle
@@ -109,10 +100,12 @@ fun ContactsScreen(
                     Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 20.dp, vertical = 10.dp)
-                        .clip(RoundedCornerShape(18.dp))
-                        .background(palette.danger.copy(alpha = 0.08f))
-                        .clickable(onClick = onOpenBlocked)
-                        .padding(horizontal = 14.dp, vertical = 11.dp),
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                            onClick = onOpenBlocked,
+                        )
+                        .padding(vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Icon(
@@ -155,11 +148,10 @@ fun ContactsScreen(
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                        start = 16.dp,
-                        end = 16.dp,
+                        start = 12.dp,
+                        end = 12.dp,
                         bottom = 100.dp,
                     ),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     items(contacts, key = { it.nexId }) { contact ->
                         ContactRow(
@@ -188,56 +180,21 @@ fun ContactsScreen(
 @Composable
 fun ContactRow(contact: ContactEntity, onClick: () -> Unit) {
     val palette = LocalNexPalette.current
-    GlassCard(
-        corner = 22.dp,
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
-    ) {
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .clickable(onClick = onClick),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Avatar(name = contact.displayName, avatar = contact.avatar, size = 52.dp)
-            Spacer(Modifier.width(13.dp))
-            Column(Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        contact.displayName,
-                        style = MaterialTheme.typography.titleMedium,
-                        color = palette.textPrimary,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    if (contact.verifiedAt != null) {
-                        Spacer(Modifier.width(5.dp))
-                        Icon(
-                            Icons.Outlined.Verified,
-                            contentDescription = "Safety number verified",
-                            tint = palette.success,
-                            modifier = Modifier.size(15.dp),
-                        )
-                    }
-                }
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    "@${contact.username} · ${contact.nexId}",
-                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
-                    color = palette.textMuted,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            Spacer(Modifier.width(8.dp))
+    ContactListRow(
+        name = contact.displayName,
+        subtitle = "@${contact.username} · ${contact.nexId}",
+        avatar = contact.avatar,
+        verified = contact.verifiedAt != null,
+        onClick = onClick,
+        trailing = {
             Icon(
                 Icons.Outlined.ChevronRight,
                 contentDescription = null,
                 tint = palette.textMuted,
                 modifier = Modifier.size(19.dp),
             )
-        }
-    }
+        },
+    )
 }
 
 @Composable
@@ -272,32 +229,20 @@ fun BlockedScreen(onBack: () -> Unit, onOpenConversation: (String) -> Unit) {
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp),
                 ) {
                     items(blocked, key = { it.nexId }) { contact ->
-                        GlassCard(corner = 22.dp, contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp)) {
-                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                Avatar(name = contact.displayName, avatar = contact.avatar, size = 48.dp)
-                                Spacer(Modifier.width(12.dp))
-                                Column(Modifier.weight(1f)) {
-                                    Text(
-                                        contact.displayName,
-                                        style = MaterialTheme.typography.titleMedium,
-                                        color = palette.textPrimary,
-                                        fontWeight = FontWeight.Bold,
-                                    )
-                                    Text(
-                                        "@${contact.username}",
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = palette.textMuted,
-                                    )
-                                }
+                        ContactListRow(
+                            name = contact.displayName,
+                            subtitle = "@${contact.username} · ${contact.nexId}",
+                            avatar = contact.avatar,
+                            avatarSize = 48.dp,
+                            trailing = {
                                 TextButton(onClick = { vm.setBlocked(contact.nexId, false) }) {
                                     Text("Unblock", color = palette.accent, fontWeight = FontWeight.Bold)
                                 }
-                            }
-                        }
+                            },
+                        )
                     }
                 }
             }

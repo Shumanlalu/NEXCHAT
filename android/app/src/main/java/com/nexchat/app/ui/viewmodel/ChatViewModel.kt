@@ -8,6 +8,7 @@ import com.nexchat.app.core.db.ContactEntity
 import com.nexchat.app.core.db.ConversationEntity
 import com.nexchat.app.core.db.GroupMemberEntity
 import com.nexchat.app.core.db.MessageEntity
+import com.nexchat.app.data.AttachmentDraft
 import com.nexchat.app.data.ChatEvent
 import com.nexchat.app.data.ChatRepository
 import com.nexchat.app.data.ContactRepository
@@ -182,6 +183,20 @@ class ChatViewModel(
                 .onFailure { error ->
                     _errors.tryEmit(error.message ?: "The message could not be sent")
                     if (_input.value.isBlank()) _input.value = text
+                }
+        }
+    }
+
+    fun sendAttachment(draft: AttachmentDraft) {
+        val reply = _replyTo.value
+        _replyTo.value = null
+        localTypingJob?.cancel()
+        localTypingActive = false
+        viewModelScope.launch {
+            runCatching { chat.setTyping(conversationId, false) }
+            runCatching { chat.sendAttachment(conversationId, draft, reply) }
+                .onFailure { error ->
+                    _errors.tryEmit(error.message ?: "The attachment could not be sent")
                 }
         }
     }

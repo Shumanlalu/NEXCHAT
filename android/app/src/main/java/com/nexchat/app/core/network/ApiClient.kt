@@ -170,6 +170,20 @@ class ApiClient(
     suspend fun pendingEnvelopes(): PendingResponse =
         decode(authenticated("GET", "/v1/messages/pending"))
 
+    /**
+     * Long-poll variant of [pendingEnvelopes]. The relay holds the request for
+     * up to [timeoutMs] and returns the moment an envelope exists for this
+     * device. This keeps call signaling effectively instant even when the
+     * WebSocket push landed on a different serverless instance.
+     */
+    suspend fun waitForEnvelopes(timeoutMs: Int = 20_000): PendingResponse =
+        decode(
+            authenticated(
+                "GET",
+                "/v1/messages/wait?timeoutMs=${timeoutMs.coerceIn(1_000, 25_000)}",
+            ),
+        )
+
     suspend fun sendEnvelopes(messages: List<OutgoingEnvelope>): SendMessagesResponse =
         decode(
             authenticated(
@@ -245,6 +259,31 @@ class ApiClient(
         )
 
     suspend fun serverConfig(): ServerConfigResponse = decode(perform("GET", "/v1/config", null, false))
+
+    suspend fun analyticsHeartbeat(): HeartbeatResponse =
+        decode(
+            authenticated(
+                "POST",
+                "/v1/analytics/heartbeat",
+                json.encodeToString(HeartbeatRequest(appVersion = BuildConfig.VERSION_NAME)),
+            ),
+        )
+
+    suspend fun analyticsEvents(events: List<AnalyticsEventDto>) {
+        authenticated(
+            "POST",
+            "/v1/analytics/events",
+            json.encodeToString(AnalyticsEventsRequest(events)),
+        )
+    }
+
+    suspend fun analyticsCrash(request: CrashReportRequest) {
+        authenticated("POST", "/v1/analytics/crashes", json.encodeToString(request))
+    }
+
+    suspend fun analyticsCall(request: CallReportRequest) {
+        authenticated("POST", "/v1/analytics/calls", json.encodeToString(request))
+    }
 
     suspend fun deleteAccount(password: String) {
         authenticated("DELETE", "/v1/account", json.encodeToString(mapOf("password" to password)))

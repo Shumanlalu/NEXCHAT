@@ -191,6 +191,9 @@ interface MessageDao {
     @Query("UPDATE messages SET reactionsJson = :json WHERE id = :id")
     suspend fun setReactions(id: String, json: String)
 
+    @Query("UPDATE messages SET body = :body WHERE id = :id AND deletedForEveryone = 0")
+    suspend fun updateBody(id: String, body: String)
+
     @Query("UPDATE messages SET error = :error WHERE id = :id")
     suspend fun setError(id: String, error: String?)
 
@@ -393,6 +396,43 @@ interface PendingIntentDao {
 }
 
 @Dao
+interface CallOutboxDao {
+    @Query(
+        """SELECT * FROM call_outbox
+           WHERE nextAttemptAt <= :now AND expiresAt > :now
+           ORDER BY createdAt ASC LIMIT :limit""",
+    )
+    suspend fun due(now: Long, limit: Int): List<CallOutboxEntity>
+
+    @Query("SELECT * FROM call_outbox WHERE expiresAt <= :now LIMIT :limit")
+    suspend fun expired(now: Long, limit: Int = 200): List<CallOutboxEntity>
+
+    @Upsert
+    suspend fun upsert(item: CallOutboxEntity)
+
+    @Query("DELETE FROM call_outbox WHERE id = :id")
+    suspend fun delete(id: String)
+
+    @Query("DELETE FROM call_outbox WHERE callId = :callId")
+    suspend fun deleteForCall(callId: String)
+
+    @Query("DELETE FROM call_outbox WHERE expiresAt <= :now")
+    suspend fun deleteExpired(now: Long)
+
+    @Query("DELETE FROM call_outbox")
+    suspend fun deleteAll()
+
+    @Query("SELECT COUNT(*) FROM call_outbox")
+    suspend fun count(): Int
+
+    @Query(
+        """UPDATE call_outbox SET attempts = attempts + 1, lastAttemptAt = :at,
+           nextAttemptAt = :nextAttemptAt, lastError = :error WHERE id = :id""",
+    )
+    suspend fun markAttempt(id: String, at: Long, nextAttemptAt: Long, error: String?)
+}
+
+@Dao
 interface RelayDao {
     @Query("SELECT * FROM relay_packets WHERE expiresAt > :now ORDER BY receivedAt ASC LIMIT :limit")
     suspend fun active(now: Long, limit: Int = 200): List<RelayPacketEntity>
@@ -444,4 +484,49 @@ interface CallHistoryDao {
 
     @Query("DELETE FROM call_history")
     suspend fun deleteAll()
+}
+
+@Dao
+interface AttachmentDao {
+    @Query("SELECT * FROM attachments WHERE id = :id")
+    suspend fun get(id: String): AttachmentEntity?
+
+    @Query("SELECT * FROM attachments WHERE id = :id")
+    fun observe(id: String): Flow<AttachmentEntity?>
+
+    @Upsert
+    suspend fun upsert(attachment: AttachmentEntity)
+
+    @Query("UPDATE attachments SET state = :state WHERE id = :id")
+    suspend fun setState(id: String, state: String)
+
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertChunk(chunk: AttachmentChunkEntity): Long
+
+    @Query("SELECT * FROM attachment_chunks WHERE attachmentId = :id ORDER BY `index` ASC")
+    suspend fun chunks(id: String): List<AttachmentChunkEntity>
+
+    @Query("SELECT COUNT(*) FROM attachment_chunks WHERE attachmentId = :id")
+    suspend fun chunkCount(id: String): Int
+
+    @Query("SELECT * FROM attachment_chunks WHERE clientId = :clientId LIMIT 1")
+    suspend fun chunkByClientId(clientId: String): AttachmentChunkEntity?
+
+    @Query("UPDATE attachment_chunks SET sent = 1 WHERE clientId = :clientId")
+    suspend fun markChunkSent(clientId: String)
+
+    @Query("SELECT COUNT(*) FROM attachment_chunks WHERE attachmentId = :id AND sent = 0")
+    suspend fun unsentChunkCount(id: String): Int
+
+    @Query("DELETE FROM attachments WHERE id = :id")
+    suspend fun delete(id: String)
+
+    @Query("DELETE FROM attachment_chunks WHERE attachmentId = :id")
+    suspend fun deleteChunks(id: String)
+
+    @Query("DELETE FROM attachments")
+    suspend fun deleteAll()
+
+    @Query("DELETE FROM attachment_chunks")
+    suspend fun deleteAllChunks()
 }

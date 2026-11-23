@@ -1,4 +1,14 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "installCommand": "npm ci --include=dev"
+  "installCommand": "npm ci --include=dev",
+  "functions": {
+    "src/server.ts": { "maxDuration": 60 },
+    "api/**/*.ts": { "maxDuration": 60 }
+  },
+  "crons": [
+    {
+      "path": "/v1/internal/heartbeat",
+      "schedule": "0 3 * * *"
+    }
+  ]
 }

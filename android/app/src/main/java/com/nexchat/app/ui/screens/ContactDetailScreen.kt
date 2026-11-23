@@ -67,6 +67,7 @@ import com.nexchat.app.ui.components.SectionTitle
 import com.nexchat.app.ui.components.StatusPill
 import com.nexchat.app.ui.nexViewModel
 import com.nexchat.app.ui.theme.LocalNexPalette
+import com.nexchat.app.ui.theme.atSize
 import com.nexchat.app.ui.viewmodel.ContactDetailViewModel
 import kotlinx.coroutines.launch
 
@@ -133,7 +134,7 @@ fun ContactDetailScreen(
                         Spacer(Modifier.height(14.dp))
                         Text(
                             contact?.displayName ?: "Contact",
-                            style = MaterialTheme.typography.headlineMedium.copy(fontSize = 24.sp),
+                            style = MaterialTheme.typography.headlineMedium,
                             color = palette.textPrimary,
                             fontWeight = FontWeight.Bold,
                             textAlign = TextAlign.Center,
@@ -161,20 +162,17 @@ fun ContactDetailScreen(
                             Column(Modifier.weight(1f)) {
                                 Text(
                                     "NEX ID",
-                                    style = MaterialTheme.typography.labelMedium.copy(
-                                        letterSpacing = 1.6.sp,
-                                        fontSize = 9.sp,
-                                    ),
+                                    style = MaterialTheme.typography.labelSmall.atSize(10.sp)
+                                        .copy(letterSpacing = 0.4.sp),
                                     color = palette.textMuted,
+                                    maxLines = 1,
                                 )
                                 Text(
                                     contact?.nexId ?: nexId,
-                                    style = MaterialTheme.typography.titleMedium.copy(
-                                        letterSpacing = 1.sp,
-                                        fontSize = 16.sp,
-                                    ),
+                                    style = MaterialTheme.typography.titleMedium.atSize(16.sp),
                                     color = palette.textPrimary,
-                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                                 )
                             }
                             GlassIconButton(
@@ -412,7 +410,7 @@ private fun SafetyNumberCard(number: SafetyNumber, onToggle: () -> Unit) {
                 Spacer(Modifier.width(4.dp))
                 Text(
                     "Verified",
-                    style = MaterialTheme.typography.labelMedium.copy(fontSize = 10.sp),
+                    style = MaterialTheme.typography.labelSmall.atSize(11.sp),
                     color = palette.success,
                 )
             }
@@ -420,13 +418,13 @@ private fun SafetyNumberCard(number: SafetyNumber, onToggle: () -> Unit) {
         Spacer(Modifier.height(8.dp))
         Text(
             formatFingerprint(number.fingerprint),
-            style = MaterialTheme.typography.bodyLarge.copy(
+            style = MaterialTheme.typography.bodyLarge.atSize(14.sp).copy(
                 fontFamily = FontFamily.Monospace,
-                fontSize = 15.sp,
-                letterSpacing = 1.2.sp,
-                lineHeight = 24.sp,
+                letterSpacing = 0.1.sp,
             ),
             color = palette.textPrimary,
+            maxLines = 4,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
         )
         Spacer(Modifier.height(8.dp))
         TextButton(onClick = onToggle) {

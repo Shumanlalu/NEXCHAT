@@ -51,17 +51,29 @@ android {
         applicationId = "com.nexchat.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.0.4"
+        versionCode = 7
+        versionName = "1.0.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        ndk {
-            abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
-        }
+        // ABI selection is done by the splits block below. Setting ndk.abiFilters
+        // here as well conflicts with splits on the Android Gradle Plugin.
 
         vectorDrawables {
             useSupportLibrary = true
+        }
+    }
+
+    // Deliver one APK per ABI. Signal's native library is roughly 74 MB per
+    // ABI uncompressed, so a universal APK cannot fit the 50 MB download
+    // budget. Every phone in scope is arm64 or 32-bit ARM; x86_64 stays for
+    // emulator/testing builds.
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a", "x86_64")
+            isUniversalApk = false
         }
     }
 
@@ -134,7 +146,11 @@ android {
             // not used by the app and would add roughly 230 MB to a universal APK.
             excludes += setOf("**/libsignal_jni_testing.so")
             pickFirsts += setOf("**/libc++_shared.so")
-            useLegacyPackaging = false
+            // Compress native libraries inside the APK. Modern Android still
+            // extracts them on install; leaving them uncompressed would keep
+            // the download above 250 MB. Measured deflate ratio on the arm64
+            // libsignal library is about 5:1.
+            useLegacyPackaging = true
         }
     }
 

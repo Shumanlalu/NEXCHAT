@@ -64,6 +64,7 @@ import com.nexchat.app.ui.components.SectionTitle
 import com.nexchat.app.ui.components.StatusPill
 import com.nexchat.app.ui.nexViewModel
 import com.nexchat.app.ui.theme.LocalNexPalette
+import com.nexchat.app.ui.theme.atSize
 import com.nexchat.app.ui.viewmodel.GroupInfoViewModel
 
 @Composable
@@ -134,7 +135,7 @@ fun GroupInfoScreen(
                         Spacer(Modifier.height(14.dp))
                         Text(
                             group?.title ?: "Group chat",
-                            style = MaterialTheme.typography.headlineMedium.copy(fontSize = 24.sp),
+                            style = MaterialTheme.typography.headlineMedium,
                             color = palette.textPrimary,
                             fontWeight = FontWeight.Bold,
                         )
@@ -333,14 +334,14 @@ fun GroupInfoScreen(
                             Column(Modifier.weight(1f)) {
                                 Text(
                                     contact.displayName,
-                                    style = MaterialTheme.typography.titleMedium.copy(fontSize = 14.sp),
+                                    style = MaterialTheme.typography.titleMedium.atSize(14.sp),
                                     color = palette.textPrimary,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                 )
                                 Text(
                                     "@${contact.username}",
-                                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
+                                    style = MaterialTheme.typography.bodySmall.atSize(11.sp),
                                     color = palette.textMuted,
                                 )
                             }
@@ -355,7 +356,7 @@ fun GroupInfoScreen(
                                     Icon(
                                         Icons.Outlined.Check,
                                         contentDescription = null,
-                                        tint = Color.White,
+                                        tint = palette.onAccent,
                                         modifier = Modifier.size(16.dp),
                                     )
                                 }
@@ -438,7 +439,7 @@ private fun MemberRow(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     member.displayName + if (isSelf) " (you)" else "",
-                    style = MaterialTheme.typography.titleMedium.copy(fontSize = 14.sp),
+                    style = MaterialTheme.typography.titleMedium.atSize(14.sp),
                     color = palette.textPrimary,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
@@ -451,7 +452,7 @@ private fun MemberRow(
             }
             Text(
                 "@${member.username}",
-                style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
+                style = MaterialTheme.typography.bodySmall.atSize(11.sp),
                 color = palette.textMuted,
             )
         }

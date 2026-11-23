@@ -76,7 +76,7 @@ class NotificationHelper(private val context: Context) {
         }
     }
 
-    fun showIncomingCall(callId: String, peerName: String) {
+    fun showIncomingCall(callId: String, peerName: String, video: Boolean = false) {
         val fullIntent = Intent(context, CallActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or
                 Intent.FLAG_ACTIVITY_CLEAR_TOP or
@@ -119,7 +119,10 @@ class NotificationHelper(private val context: Context) {
         val call = NotificationCompat.Builder(context, CHANNEL_CALLS)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(peerName.ifBlank { "Incoming call" })
-            .setContentText("Incoming end-to-end encrypted voice call")
+            .setContentText(
+                if (video) "Incoming end-to-end encrypted video call"
+                else "Incoming end-to-end encrypted voice call",
+            )
             .setContentIntent(fullScreen)
             .setFullScreenIntent(fullScreen, true)
             .setCategory(NotificationCompat.CATEGORY_CALL)
@@ -140,6 +143,32 @@ class NotificationHelper(private val context: Context) {
         runCatching {
             NotificationManagerCompat.from(context).cancel(CALL_NOTIFICATION_ID)
         }
+    }
+
+    fun callServiceNotification(video: Boolean = false): android.app.Notification {
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pending = PendingIntent.getActivity(
+            context,
+            CALL_SERVICE_NOTIFICATION_ID,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        return NotificationCompat.Builder(context, CHANNEL_SERVICE)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle(if (video) "NEXCHAT video call" else "NEXCHAT voice call")
+            .setContentText(
+                if (video) "Microphone and camera are active during this call"
+                else "Microphone is active during this call",
+            )
+            .setContentIntent(pending)
+            .setOngoing(true)
+            .setSilent(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setVisibility(NotificationCompat.VISIBILITY_SECRET)
+            .build()
     }
 
     fun serviceNotification(): android.app.Notification {
@@ -171,6 +200,10 @@ class NotificationHelper(private val context: Context) {
         const val CHANNEL_SERVICE = "nexchat_service_v1"
         const val EXTRA_CONVERSATION_ID = "conversation_id"
         const val SERVICE_NOTIFICATION_ID = 4801
-        const val CALL_NOTIFICATION_ID = 4802
+        // These must be distinct. Reusing the foreground-service ID makes the
+        // incoming-call notification replace (and later cancel) the microphone
+        // service notification, which can get the service killed mid-call.
+        const val CALL_SERVICE_NOTIFICATION_ID = 4802
+        const val CALL_NOTIFICATION_ID = 4803
     }
 }

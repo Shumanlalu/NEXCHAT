@@ -6,3 +6,8 @@ fs.copyFileSync(
   path.join(__dirname, "..", "src", "schema.sql"),
   path.join(__dirname, "..", "dist", "schema.sql"),
 );
+fs.mkdirSync(path.join(__dirname, "..", "dist", "admin"), { recursive: true });
+fs.copyFileSync(
+  path.join(__dirname, "..", "src", "admin", "ui.html"),
+  path.join(__dirname, "..", "dist", "admin", "ui.html"),
+);

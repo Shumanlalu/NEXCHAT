@@ -10,6 +10,11 @@ import { registerAuthRoutes } from "./routes/auth";
 import { registerGroupRoutes } from "./routes/groups";
 import { registerMessageRoutes } from "./routes/messages";
 import { registerKeyRoutes, registerUserRoutes } from "./routes/users";
+import { registerAdminAuthRoutes } from "./routes/admin-auth";
+import { registerAdminCoreRoutes } from "./routes/admin-core";
+import { registerAdminConfigRoutes } from "./routes/admin-config";
+import { registerAnalyticsRoutes } from "./routes/analytics";
+import { registerAdminUiRoutes } from "./admin/ui";
 import { TokenService } from "./security/tokens";
 import { WsHub } from "./ws/hub";
 
@@ -111,6 +116,11 @@ export async function buildApp(
   await registerKeyRoutes(app, { db, tokens, config });
   await registerMessageRoutes(app, { db, tokens, config, hub });
   await registerGroupRoutes(app, { db, tokens });
+  await registerAnalyticsRoutes(app, { db, tokens, config });
+  await registerAdminAuthRoutes(app, { db, config });
+  await registerAdminCoreRoutes(app, { db, config, hub });
+  await registerAdminConfigRoutes(app, { db, config });
+  await registerAdminUiRoutes(app);
 
   app.get("/v1/presence/:nexId", async (request, reply) => {
     const authHeader = getBearerToken(request);
@@ -159,19 +169,25 @@ export async function buildApp(
         return;
       }
       const rows = await db.query<UserRow & DeviceRow>(
-        `SELECT u.id, u.nex_id, u.deleted_at, d.id AS ws_device_id, d.revoked_at
+        `SELECT u.id, u.nex_id, u.deleted_at, u.suspended_at, d.id AS ws_device_id, d.revoked_at
          FROM users u JOIN devices d ON d.user_id = u.id
          WHERE u.id = $1 AND d.id = $2`,
         [claims.sub, claims.did],
       );
       const row = rows[0];
-      if (!row || row.deleted_at || row.revoked_at) {
+      if (!row || row.deleted_at || row.suspended_at || row.revoked_at) {
         socket.close(4403, "session revoked");
         return;
       }
 
+      if (socket.readyState !== socket.OPEN) return;
       const connection = hub.add(socket, claims.sub, claims.did);
-      socket.send(JSON.stringify({ type: "ready", deviceId: claims.did }));
+      try {
+        socket.send(JSON.stringify({ type: "ready", deviceId: claims.did }));
+      } catch {
+        hub.remove(connection);
+        return;
+      }
       await db
         .query("UPDATE devices SET last_seen_at = now() WHERE id = $1", [claims.did])
         .catch(() => undefined);

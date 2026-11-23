@@ -208,6 +208,7 @@ data class OutgoingEnvelope(
     val cipherType: Int,
     val ephemeral: Boolean = false,
     val expiresInSeconds: Int = 604800,
+    val priority: Boolean = false,
     val groupId: String? = null,
 )
 
@@ -269,7 +270,79 @@ data class IceServerDto(
 data class ServerConfigResponse(
     val iceServers: List<IceServerDto> = emptyList(),
     val limits: LimitDto? = null,
+    val remote: RemoteConfigDto? = null,
+    val announcement: AnnouncementDto? = null,
+    val serverTime: String? = null,
     val features: FeatureDto? = null,
+)
+
+/** Server-controlled behaviour that ships in every APK. */
+@Serializable
+data class RemoteConfigDto(
+    val version: Int = 0,
+    val callsEnabled: Boolean = true,
+    val videoCallsEnabled: Boolean = false,
+    val maxCallDurationSeconds: Int = 3600,
+    val maintenanceMode: Boolean = false,
+    val maintenanceMessage: String = "",
+    val minAppVersion: String = "1.0.0",
+)
+
+@Serializable
+data class AnnouncementDto(
+    val title: String = "",
+    val body: String = "",
+    val severity: String = "info",
+    val startsAt: String? = null,
+    val endsAt: String? = null,
+)
+
+@Serializable
+data class HeartbeatRequest(
+    val appVersion: String,
+    val platform: String = "android",
+)
+
+@Serializable
+data class HeartbeatResponse(
+    val ok: Boolean = true,
+    val serverTime: String? = null,
+)
+
+@Serializable
+data class AnalyticsEventDto(
+    val type: String,
+    val appVersion: String? = null,
+    val platform: String? = "android",
+    val metadata: Map<String, String>? = null,
+)
+
+@Serializable
+data class AnalyticsEventsRequest(val events: List<AnalyticsEventDto>)
+
+@Serializable
+data class CrashReportRequest(
+    val message: String,
+    val stack: String? = null,
+    val appVersion: String? = null,
+    val platform: String? = "android",
+    val context: Map<String, String>? = null,
+)
+
+@Serializable
+data class CallReportRequest(
+    val callId: String,
+    val role: String,
+    val peerNexId: String,
+    val mode: String = "audio",
+    val status: String,
+    val startedAt: String? = null,
+    val connectedAt: String? = null,
+    val endedAt: String? = null,
+    val durationSeconds: Int? = null,
+    val failureReason: String? = null,
+    val appVersion: String? = null,
+    val platform: String? = "android",
 )
 
 @Serializable
@@ -286,6 +359,8 @@ data class FeatureDto(
     val nearbyRelay: String = "unavailable",
     val audioCalls: String = "webrtc-audio-1to1",
     val pushNotifications: Boolean = false,
+    /** True when the relay advertises at least one turn:/turns: server. */
+    val turnConfigured: Boolean = false,
 )
 
 @Serializable

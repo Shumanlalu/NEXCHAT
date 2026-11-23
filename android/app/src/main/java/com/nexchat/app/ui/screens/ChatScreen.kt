@@ -1,7 +1,15 @@
 package com.nexchat.app.ui.screens
 
 import android.Manifest
+import android.content.ContentValues
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -42,12 +50,15 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.DoneAll
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.InsertDriveFile
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Reply
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material.icons.outlined.Send
+import androidx.compose.material.icons.outlined.Videocam
 import androidx.compose.material.icons.outlined.VolumeOff
 import androidx.compose.material.icons.outlined.VolumeUp
 import androidx.compose.material3.AlertDialog
@@ -84,14 +95,18 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.paging.compose.collectAsLazyPagingItems
 import androidx.paging.compose.itemKey
 import com.nexchat.app.NexChatApp
+import com.nexchat.app.core.db.AttachmentEntity
 import com.nexchat.app.core.db.ConversationEntity
 import com.nexchat.app.core.db.MessageEntity
 import com.nexchat.app.core.db.MessageKind
 import com.nexchat.app.core.db.MessageStatus
+import com.nexchat.app.data.AttachmentDraft
+import com.nexchat.app.data.MAX_ATTACHMENT_BYTES
 import com.nexchat.app.ui.components.Avatar
 import com.nexchat.app.ui.components.ConfirmDialog
 import com.nexchat.app.ui.components.GlassIconButton
@@ -100,8 +115,13 @@ import com.nexchat.app.ui.formatDayLabel
 import com.nexchat.app.ui.nexViewModel
 import com.nexchat.app.ui.reactionSummary
 import com.nexchat.app.ui.theme.LocalNexPalette
+import com.nexchat.app.ui.theme.atSize
 import com.nexchat.app.ui.viewmodel.ChatViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
+import java.io.File
 import java.time.Instant
 import java.time.ZoneId
 
@@ -118,6 +138,7 @@ fun ChatScreen(
     val container = remember(context) { NexChatApp.from(context).container }
     val vm = nexViewModel(key = conversationId) { ChatViewModel(it.chat, it.contacts, conversationId) }
     val conversation by vm.conversation.collectAsStateWithLifecycle()
+    val remote by container.remoteConfig.state.collectAsStateWithLifecycle()
     val input by vm.input.collectAsStateWithLifecycle()
     val replyTo by vm.replyTo.collectAsStateWithLifecycle()
     val typing by vm.typing.collectAsStateWithLifecycle()
@@ -133,7 +154,7 @@ fun ChatScreen(
     var editTarget by remember { mutableStateOf<MessageEntity?>(null) }
     var confirmClear by remember { mutableStateOf(false) }
     var confirmDeleteAll by remember { mutableStateOf<MessageEntity?>(null) }
-    var pendingCall by remember { mutableStateOf(false) }
+    var pendingCallVideo by remember { mutableStateOf<Boolean?>(null) }
 
     LaunchedEffect(Unit) {
         vm.errors.collect { snackbar.showSnackbar(it) }
@@ -147,12 +168,18 @@ fun ChatScreen(
         else -> "end-to-end encrypted"
     }
 
-    fun beginVoiceCall() {
+    fun beginCall(video: Boolean) {
+        if (!remote.callsEnabled) {
+            scope.launch {
+                snackbar.showSnackbar("Calling is temporarily unavailable.")
+            }
+            return
+        }
         val target = conv
         val peer = target?.peerNexId
         if (target?.type != "DM" || peer.isNullOrBlank()) {
             scope.launch {
-                snackbar.showSnackbar("Voice calls are available only in one-to-one chats.")
+                snackbar.showSnackbar("Calls are available only in one-to-one chats.")
             }
             return
         }
@@ -161,7 +188,13 @@ fun ChatScreen(
             return
         }
         runCatching {
-            container.call.startOutgoing(target.id, peer, target.title, target.avatar)
+            container.call.startOutgoing(
+                conversationId = target.id,
+                peerNexId = peer,
+                peerName = target.title,
+                peerAvatar = target.avatar,
+                video = video,
+            )
         }.onFailure { error ->
             scope.launch {
                 snackbar.showSnackbar(error.message ?: "The call could not be started")
@@ -169,37 +202,130 @@ fun ChatScreen(
         }
     }
 
-    val callPermission = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        val startAfterGrant = pendingCall
-        pendingCall = false
-        if (granted && startAfterGrant) {
-            beginVoiceCall()
-        } else if (!granted) {
-            scope.launch {
-                snackbar.showSnackbar("Microphone permission is required for voice calls.")
+    val callPermissions = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { results ->
+        val video = pendingCallVideo ?: false
+        pendingCallVideo = null
+        val microphone = results[Manifest.permission.RECORD_AUDIO] == true ||
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.RECORD_AUDIO,
+            ) == PackageManager.PERMISSION_GRANTED
+        val camera = results[Manifest.permission.CAMERA] == true ||
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.CAMERA,
+            ) == PackageManager.PERMISSION_GRANTED
+        when {
+            !microphone -> scope.launch {
+                snackbar.showSnackbar("Microphone permission is required for calls.")
             }
+            video && !camera -> scope.launch {
+                snackbar.showSnackbar("Camera permission is required for video calls.")
+            }
+            else -> beginCall(video)
         }
     }
 
-    fun requestVoiceCall() {
-        if (conv?.type != "DM" || blocked) {
+    fun requestCall(video: Boolean) {
+        if (!remote.callsEnabled) {
             scope.launch {
-                snackbar.showSnackbar("Voice calls are available only in one-to-one chats.")
+                snackbar.showSnackbar("Calling is temporarily unavailable.")
             }
             return
         }
-        val granted = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.RECORD_AUDIO,
-        ) == PackageManager.PERMISSION_GRANTED
-        if (granted) {
-            beginVoiceCall()
-        } else {
-            pendingCall = true
-            callPermission.launch(Manifest.permission.RECORD_AUDIO)
+        if (conv?.type != "DM" || blocked) {
+            scope.launch {
+                snackbar.showSnackbar("Calls are available only in one-to-one chats.")
+            }
+            return
         }
+        val missing = buildList {
+            if (ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.RECORD_AUDIO,
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                add(Manifest.permission.RECORD_AUDIO)
+            }
+            if (video && ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.CAMERA,
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                add(Manifest.permission.CAMERA)
+            }
+        }
+        if (missing.isEmpty()) {
+            beginCall(video)
+        } else {
+            pendingCallVideo = video
+            callPermissions.launch(missing.toTypedArray())
+        }
+    }
+
+    val attachmentPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            runCatching { readAttachmentDraft(context, uri) }
+                .onSuccess { draft -> vm.sendAttachment(draft) }
+                .onFailure { error ->
+                    snackbar.showSnackbar(
+                        error.message ?: "That file could not be read. Try a different file.",
+                    )
+                }
+        }
+    }
+
+    suspend fun openAttachment(attachment: AttachmentEntity, bytes: ByteArray) {
+        val file = withContext(Dispatchers.IO) {
+            val dir = File(context.cacheDir, "attachments").apply { mkdirs() }
+            File(dir, safeAttachmentName(attachment.fileName)).apply { writeBytes(bytes) }
+        }
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+        val intent = Intent(Intent.ACTION_VIEW)
+            .setDataAndType(uri, attachment.mimeType.ifBlank { "*/*" })
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        runCatching { context.startActivity(Intent.createChooser(intent, "Open attachment")) }
+            .onFailure { snackbar.showSnackbar("No app can open this file type") }
+    }
+
+    fun saveAttachment(attachment: AttachmentEntity, bytes: ByteArray) {
+        scope.launch {
+            runCatching {
+                val name = safeAttachmentName(attachment.fileName)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val values = ContentValues().apply {
+                        put(MediaStore.Downloads.DISPLAY_NAME, name)
+                        put(MediaStore.Downloads.MIME_TYPE, attachment.mimeType)
+                        put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+                    }
+                    val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                        ?: throw IllegalStateException("Could not create the Downloads entry")
+                    context.contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
+                        ?: throw IllegalStateException("Could not write the downloaded file")
+                    "Saved to Downloads"
+                } else {
+                    val dir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+                        ?: throw IllegalStateException("Downloads folder is unavailable")
+                    File(dir, name).writeBytes(bytes)
+                    "Saved to app Downloads folder"
+                }
+            }.onSuccess { snackbar.showSnackbar(it) }
+                .onFailure { snackbar.showSnackbar(it.message ?: "The file could not be saved") }
+        }
+    }
+
+    suspend fun openAttachmentMessage(message: MessageEntity) {
+        val loaded = container.chat.loadAttachment(message.id)
+        if (loaded == null) {
+            snackbar.showSnackbar("This attachment is still transferring or could not be verified")
+            return
+        }
+        openAttachment(loaded.first, loaded.second)
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -211,8 +337,10 @@ fun ChatScreen(
                 isGroup = conv?.type == "GROUP",
                 online = online,
                 onBack = onBack,
-                onCall = { requestVoiceCall() },
-                callEnabled = conv?.type == "DM" && !blocked,
+                onCall = { requestCall(video = false) },
+                onVideoCall = { requestCall(video = true) },
+                callEnabled = conv?.type == "DM" && !blocked && remote.callsEnabled,
+                videoCallEnabled = conv?.type == "DM" && !blocked && remote.callsEnabled,
                 onInfo = {
                     val target = conv
                     if (target?.type == "GROUP") {
@@ -291,6 +419,7 @@ fun ChatScreen(
                                         message = message,
                                         isGroup = conv?.type == "GROUP",
                                         onLongPress = { selectedMessage = message },
+                                        onOpenAttachment = { scope.launch { openAttachmentMessage(it) } },
                                     )
                                 }
                             }
@@ -347,11 +476,7 @@ fun ChatScreen(
                     onValueChange = vm::setInput,
                     onSend = vm::send,
                     onClearReply = { vm.replyTo(null) },
-                    onAttach = {
-                        scope.launch {
-                            snackbar.showSnackbar("Encrypted attachments are not available in this build.")
-                        }
-                    },
+                    onAttach = { attachmentPicker.launch("*/*") },
                 )
             }
         }
@@ -481,6 +606,23 @@ fun ChatScreen(
                         selectedMessage = null
                     },
                 )
+                if (selected.kind == MessageKind.ATTACHMENT) {
+                    SheetAction(
+                        icon = Icons.Outlined.Download,
+                        label = "Save to Downloads",
+                        onClick = {
+                            scope.launch {
+                                val loaded = container.chat.loadAttachment(selected.id)
+                                if (loaded == null) {
+                                    snackbar.showSnackbar("This attachment is not ready yet")
+                                } else {
+                                    saveAttachment(loaded.first, loaded.second)
+                                }
+                            }
+                            selectedMessage = null
+                        },
+                    )
+                }
                 if (selected.outgoing && selected.kind == "TEXT" && !selected.deletedForEveryone) {
                     SheetAction(
                         icon = Icons.Outlined.Edit,
@@ -597,6 +739,8 @@ private fun ChatHeader(
     onBack: () -> Unit,
     onCall: () -> Unit,
     callEnabled: Boolean,
+    onVideoCall: () -> Unit,
+    videoCallEnabled: Boolean,
     onInfo: () -> Unit,
     onMore: () -> Unit,
 ) {
@@ -634,13 +778,21 @@ private fun ChatHeader(
                 }
                 Text(
                     subtitle,
-                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
+                    style = MaterialTheme.typography.bodySmall.atSize(11.sp),
                     color = palette.textSecondary,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
         }
+        GlassIconButton(
+            Icons.Outlined.Videocam,
+            contentDescription = "Video call",
+            onClick = onVideoCall,
+            size = 40.dp,
+            enabled = videoCallEnabled,
+        )
+        Spacer(Modifier.width(6.dp))
         GlassIconButton(
             Icons.Outlined.Call,
             contentDescription = "Call",
@@ -659,13 +811,14 @@ private fun MessageBubble(
     message: MessageEntity,
     isGroup: Boolean,
     onLongPress: () -> Unit,
+    onOpenAttachment: (MessageEntity) -> Unit,
 ) {
     val palette = LocalNexPalette.current
     val outgoing = message.outgoing
     val bubbleShape = if (outgoing) {
-        RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 20.dp, bottomEnd = 7.dp)
+        RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp, bottomStart = 16.dp, bottomEnd = 6.dp)
     } else {
-        RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 7.dp, bottomEnd = 20.dp)
+        RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp, bottomStart = 6.dp, bottomEnd = 16.dp)
     }
     val textColor = if (outgoing) Color.White else palette.textPrimary
     val secondary = if (outgoing) Color.White.copy(alpha = 0.66f) else palette.textSecondary
@@ -677,25 +830,19 @@ private fun MessageBubble(
             Modifier
                 .widthIn(min = 84.dp, max = 340.dp)
                 .clip(bubbleShape)
-                .background(
-                    if (outgoing) {
-                        Brush.linearGradient(listOf(palette.bubbleOutStart, palette.bubbleOutEnd))
-                    } else {
-                        Brush.linearGradient(listOf(palette.bubbleIn, palette.bubbleIn))
-                    },
-                )
+                .background(if (outgoing) palette.bubbleOutStart else palette.bubbleIn)
                 .border(
                     1.dp,
-                    if (outgoing) Color.White.copy(alpha = 0.12f) else palette.glassBorder,
+                    if (outgoing) Color.Transparent else palette.divider,
                     bubbleShape,
                 )
                 .combinedClickable(onClick = {}, onLongClick = onLongPress)
-                .padding(horizontal = 14.dp, vertical = 9.dp),
+                .padding(horizontal = 13.dp, vertical = 8.dp),
         ) {
             if (isGroup && !outgoing) {
                 Text(
                     message.senderDisplayName,
-                    style = MaterialTheme.typography.labelMedium.copy(fontSize = 10.sp),
+                    style = MaterialTheme.typography.labelSmall.atSize(11.sp),
                     color = palette.accent,
                     fontWeight = FontWeight.Bold,
                     maxLines = 1,
@@ -745,14 +892,57 @@ private fun MessageBubble(
                     Spacer(Modifier.width(7.dp))
                     Text(
                         message.body,
-                        style = MaterialTheme.typography.bodyLarge.copy(fontSize = 15.sp, lineHeight = 21.sp),
+                        style = MaterialTheme.typography.bodyLarge.atSize(15.sp),
                         color = textColor,
+                    )
+                }
+            } else if (message.kind == MessageKind.ATTACHMENT) {
+                val details = message.body.removePrefix("📎 ").split(" · ", limit = 2)
+                val name = details.firstOrNull().orEmpty().ifBlank { "Attachment" }
+                val status = details.getOrNull(1).orEmpty()
+                Row(
+                    Modifier
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color.White.copy(alpha = if (outgoing) 0.1f else 0.5f))
+                        .clickable { onOpenAttachment(message) }
+                        .padding(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        Icons.Outlined.InsertDriveFile,
+                        contentDescription = null,
+                        tint = if (outgoing) Color.White else palette.accent,
+                        modifier = Modifier.size(26.dp),
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            name,
+                            style = MaterialTheme.typography.bodyMedium.atSize(14.sp),
+                            color = textColor,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        if (status.isNotBlank()) {
+                            Text(
+                                status,
+                                style = MaterialTheme.typography.labelSmall.atSize(10.sp),
+                                color = secondary,
+                            )
+                        }
+                    }
+                    Icon(
+                        Icons.Outlined.Download,
+                        contentDescription = "Open attachment",
+                        tint = secondary,
+                        modifier = Modifier.size(18.dp),
                     )
                 }
             } else {
                 Text(
                     message.body,
-                    style = MaterialTheme.typography.bodyLarge.copy(fontSize = 15.sp, lineHeight = 21.sp),
+                    style = MaterialTheme.typography.bodyLarge.atSize(15.sp),
                     color = textColor,
                 )
             }
@@ -773,7 +963,7 @@ private fun MessageBubble(
                                 Spacer(Modifier.width(3.dp))
                                 Text(
                                     count.toString(),
-                                    style = MaterialTheme.typography.labelMedium.copy(fontSize = 10.sp),
+                                    style = MaterialTheme.typography.labelSmall.atSize(11.sp),
                                     color = secondary,
                                 )
                             }
@@ -790,13 +980,13 @@ private fun MessageBubble(
                 if (message.editedAt != null && !message.deletedForEveryone) {
                     Text(
                         "edited · ",
-                        style = MaterialTheme.typography.labelMedium.copy(fontSize = 9.sp),
+                        style = MaterialTheme.typography.labelSmall.atSize(10.sp),
                         color = secondary,
                     )
                 }
                 Text(
                     formatClock(message.sentAt),
-                    style = MaterialTheme.typography.labelMedium.copy(fontSize = 9.sp),
+                    style = MaterialTheme.typography.labelSmall.atSize(10.sp),
                     color = secondary,
                 )
                 if (outgoing) {
@@ -812,7 +1002,7 @@ private fun MessageBubble(
                 Spacer(Modifier.height(2.dp))
                 Text(
                     message.error,
-                    style = MaterialTheme.typography.labelMedium.copy(fontSize = 9.sp),
+                    style = MaterialTheme.typography.labelSmall.atSize(10.sp),
                     color = if (outgoing) Color(0xFFFFC2CD) else palette.danger,
                     modifier = Modifier.align(if (outgoing) Alignment.End else Alignment.Start),
                 )
@@ -852,15 +1042,60 @@ private fun DayDivider(epochMillis: Long) {
     ) {
         Text(
             formatDayLabel(epochMillis),
-            style = MaterialTheme.typography.labelMedium.copy(fontSize = 10.sp, letterSpacing = 0.8.sp),
+            style = MaterialTheme.typography.labelSmall.atSize(11.sp),
             color = palette.textMuted,
             modifier = Modifier
-                .clip(RoundedCornerShape(50))
+                .clip(RoundedCornerShape(8.dp))
                 .background(palette.glass)
                 .padding(horizontal = 12.dp, vertical = 4.dp),
         )
     }
 }
+
+private fun safeAttachmentName(name: String): String =
+    name.replace(Regex("[/\\\\]"), "_").trim().take(120).ifBlank { "attachment" }
+
+private suspend fun readAttachmentDraft(context: Context, uri: Uri): AttachmentDraft =
+    withContext(Dispatchers.IO) {
+        val resolver = context.contentResolver
+        val name = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (index >= 0) cursor.getString(index) else null
+            } else {
+                null
+            }
+        }?.let(::safeAttachmentName) ?: "attachment"
+        val declaredSize = resolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                val index = cursor.getColumnIndex(OpenableColumns.SIZE)
+                if (index >= 0 && !cursor.isNull(index)) cursor.getLong(index) else -1L
+            } else {
+                -1L
+            }
+        } ?: -1L
+        if (declaredSize > MAX_ATTACHMENT_BYTES) {
+            throw IllegalArgumentException("Attachments must be ${MAX_ATTACHMENT_BYTES / (1024 * 1024)} MB or smaller")
+        }
+        val mime = resolver.getType(uri) ?: "application/octet-stream"
+        val stream = resolver.openInputStream(uri)
+            ?: throw IllegalArgumentException("That file could not be opened")
+        val bytes = stream.use { input ->
+            val output = ByteArrayOutputStream()
+            val buffer = ByteArray(16 * 1024)
+            while (true) {
+                val read = input.read(buffer)
+                if (read <= 0) break
+                output.write(buffer, 0, read)
+                if (output.size() > MAX_ATTACHMENT_BYTES) {
+                    throw IllegalArgumentException("Attachments must be ${MAX_ATTACHMENT_BYTES / (1024 * 1024)} MB or smaller")
+                }
+            }
+            output.toByteArray()
+        }
+        if (bytes.isEmpty()) throw IllegalArgumentException("The selected file is empty")
+        AttachmentDraft(fileName = name, mimeType = mime, bytes = bytes)
+    }
 
 @Composable
 private fun Composer(
@@ -901,7 +1136,7 @@ private fun Composer(
                 Column(Modifier.weight(1f)) {
                     Text(
                         "Replying to ${replyTo.senderDisplayName}",
-                        style = MaterialTheme.typography.labelMedium.copy(fontSize = 10.sp),
+                        style = MaterialTheme.typography.labelSmall.atSize(11.sp),
                         color = palette.accent,
                     )
                     Text(
@@ -925,9 +1160,9 @@ private fun Composer(
         Row(
             Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(28.dp))
+                .clip(RoundedCornerShape(16.dp))
                 .background(palette.glassStrong)
-                .border(1.dp, palette.glassBorder, RoundedCornerShape(28.dp))
+                .border(1.dp, palette.divider, RoundedCornerShape(16.dp))
                 .padding(start = 8.dp, end = 7.dp, top = 6.dp, bottom = 6.dp),
             verticalAlignment = Alignment.Bottom,
         ) {
@@ -983,7 +1218,7 @@ private fun Composer(
                 Icon(
                     Icons.Outlined.Send,
                     contentDescription = "Send",
-                    tint = if (value.isNotBlank()) Color.White else palette.textMuted,
+                    tint = if (value.isNotBlank()) palette.onAccent else palette.textMuted,
                     modifier = Modifier.size(20.dp),
                 )
             }

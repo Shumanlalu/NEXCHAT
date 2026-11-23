@@ -21,11 +21,11 @@ numbers, and per-device sessions.
 | Private groups | Implemented as pairwise encrypted fan-out to every member device |
 | Encrypted local storage | SQLCipher; key protected with Android Keystore AES-GCM |
 | Message states | Pending, sent, delivered, read, failed; sent only after the relay accepts ciphertext, delivered only after the recipient device acknowledges it |
-| Reliability | Durable SQLCipher-backed intent/outbox queues, automatic exponential-backoff retry, relay deduplication, durable delivery receipts, device-list refresh, duplicate-envelope detection, 5-second queued-message polling fallback, 15-minute WorkManager safety net |
+| Reliability | Durable SQLCipher-backed intent/outbox queues, automatic exponential-backoff retry, relay deduplication, durable delivery receipts, device-list refresh, duplicate-envelope detection, server long-poll for near-instant delivery plus a 5-second queued-message fallback, 15-minute WorkManager safety net |
 | Offline composition | Messages can be written with no connection; encrypted content and the local bubble survive process death and send automatically when the relay is reachable |
 | Identity verification | Per-device numeric safety numbers, contact-level verification marker, proactive identity-change detection, manual session reset from the contact screen |
 | Attachments | Not implemented in this build; avatar uploads are re-encoded to strip EXIF/GPS metadata |
-| Voice calls | One-to-one WebRTC audio with 1.5-second call-signal polling; SDP and ICE travel inside Signal envelopes. Video is not implemented |
+| Voice calls | One-to-one WebRTC audio with a dedicated low-latency call outbox and long-poll delivery; SDP and ICE travel inside Signal envelopes. Video is not implemented |
 | Bluetooth LE nearby messaging | Not implemented in this build |
 | Offline voice-note transcription | Not implemented; there is no audio recording or attachment pipeline |
 | QR device linking | Not implemented; sign in separately on each device |
@@ -151,6 +151,86 @@ instance. For guaranteed low-latency realtime fan-out at scale, deploy the
 Docker server on a host that keeps one process running, or add a shared pub/sub
 layer.
 
+### Super Admin Panel
+
+The operations panel is served by the same Fastify process at `/admin`; there is
+no separate frontend host and no CDN dependency. It uses only first-party HTML,
+CSS and JavaScript with a nonce-based Content Security Policy.
+
+Features:
+
+- Password plus RFC 6238 TOTP sign-in, scrypt password hashing, encrypted TOTP
+  secrets, HttpOnly `SameSite=Strict` session cookies, HMAC CSRF tokens, and
+  lockout after repeated failures.
+- Role-based access: `super_admin`, `admin`, `analyst`, and `support`. Every
+  sensitive action is written to an append-only audit log.
+- Real dashboard metrics from PostgreSQL: registrations, daily active users,
+  message volume, call outcomes and connect time, crashes, platform/version
+  breakdown, database latency and size. There are no sample or fabricated
+  numbers.
+- User administration with suspend, restore, and soft-delete. Suspension blocks
+  authenticated HTTP, login, refresh, and WebSocket access immediately.
+- Remote configuration with version history and rollback, plus in-app
+  announcements. Android 1.0.4 and later honour these settings, cache the last
+  response, and refresh every five minutes.
+- CSV exports for users, calls, crashes, and audit entries; printable views.
+- Monitoring of crash reports, failed-call reasons, service heartbeats, and
+  database health.
+
+Configure the panel on Vercel (or in `.env` for Docker/local):
+
+| Variable | Purpose |
+| --- | --- |
+| `ADMIN_SETUP_TOKEN` | One-time secret for `POST /v1/admin/setup`. Empty disables setup. Setup closes permanently once an administrator exists. |
+| `ADMIN_SESSION_HOURS` | Admin session lifetime, default `12`, maximum `72`. |
+| `CRON_SECRET` | Bearer token for `POST /v1/internal/heartbeat` (uptime sample plus retention cleanup). Vercel Cron sends it automatically. |
+
+Bootstrap on a fresh database:
+
+```powershell
+# From the repository root (the Vercel project root directory is backend/)
+npx vercel env add ADMIN_SETUP_TOKEN production
+npx vercel env add CRON_SECRET production
+npx vercel --prod --yes
+```
+
+Open `https://nexchat-three.vercel.app/admin`, enter the setup token, and store
+the displayed authenticator secret before continuing. The secret is shown once.
+After the first administrator exists, setup returns `409` even if the bootstrap
+token remains configured; you can remove the variable and redeploy.
+
+### Creating another admin / recovering a locked-out account
+
+The first-run setup page closes permanently, so a sole admin who loses their
+password or authenticator can use the token-gated signup page instead:
+
+1. Open `https://nexchat-three.vercel.app/admin/signup` (also linked as
+   "Lost access?" from the sign-in page).
+2. Enter the `ADMIN_SETUP_TOKEN` value and choose a username and password.
+3. Scan the displayed **QR code** with Google Authenticator, or copy the manual
+   secret, then sign in with that code.
+
+Every screen that reveals a TOTP secret — first-run setup, signup, **Add
+administrator**, and **Reset 2FA** — now renders an inline QR code. The image is
+generated on the server; the secret is never sent to a third-party QR service.
+
+`POST /v1/admin/signup` is rate limited and writes an `admin.signup.completed`
+audit entry. It only **adds** a super admin; it does not reset or disable an
+existing one. Treat `ADMIN_SETUP_TOKEN` as a break-glass credential and remove it
+from Vercel once you are back in if you no longer need it.
+
+Vercel Hobby allows one cron run per day, so `backend/vercel.json` schedules the
+heartbeat and retention job daily at 03:00 UTC. On Vercel Pro, change the
+schedule to `*/5 * * * *` for five-minute monitoring. On any plan, an external
+scheduler (for example a GitHub Action or UptimeRobot) can call
+`POST /v1/internal/heartbeat` with `Authorization: Bearer <CRON_SECRET>` more
+frequently.
+
+Android telemetry is deliberately metadata-only. The app reports app version,
+platform, feature events, crash message/stack, and call lifecycle outcomes. It
+never uploads message plaintext, encryption keys, call audio/video, passwords,
+or tokens. Message counts are derived server-side from envelope inserts.
+
 ### Supabase database
 
 `supabase/` contains a deployable schema, RLS lockdown, and storage policies for
@@ -200,8 +280,12 @@ ignored by version control. Then run:
 .\gradlew.bat assembleRelease
 ```
 
-The release APK is written to `android/app/build/outputs/apk/release/` and talks
-only to the HTTPS server baked into that build.
+The release build produces one APK per ABI (`app-arm64-v8a-release.apk`,
+`app-armeabi-v7a-release.apk`, `app-x86_64-release.apk`) because the Signal
+crypto library alone is about 74 MB per architecture uncompressed. Native
+libraries are stored compressed, and there is deliberately no universal APK so
+the download stays under 50 MB. Ship the `arm64-v8a` APK to modern phones; use
+`armeabi-v7a` only for older 32-bit devices and `x86_64` only for emulators.
 
 ## First use
 
@@ -249,9 +333,10 @@ only to the HTTPS server baked into that build.
   call recording. Both people must have the app process or foreground service
   connected. Without push notifications, a killed app cannot receive a call.
   Incoming-call alerts also depend on notification and full-screen-intent
-  permission on newer Android versions. While a call is active, NEXCHAT polls
-  the encrypted queue every 1.5 seconds; the normal receive poll runs every 5
-  seconds.
+  permission on newer Android versions. Call signalling has its own durable
+  outbox with fast retries, and the client holds a dedicated long-poll so an
+  offer, answer, or ICE candidate is delivered as soon as the relay stores it.
+  The normal receive poll remains a 5-second fallback.
 - The default deployment configures public Google STUN servers but no TURN
   relay. Calls between peers behind restrictive or symmetric NATs can therefore
   fail to connect until the operator sets `ICE_SERVERS_JSON` to include a TURN

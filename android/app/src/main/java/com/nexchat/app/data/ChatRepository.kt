@@ -1,5 +1,6 @@
 package com.nexchat.app.data
 
+import android.util.Base64
 import androidx.paging.Pager
 import androidx.paging.PagingConfig
 import androidx.paging.PagingData
@@ -12,7 +13,11 @@ import com.nexchat.app.core.crypto.IdentityChangedException
 import com.nexchat.app.core.crypto.SecureContent
 import com.nexchat.app.core.crypto.SignalCryptoManager
 import com.nexchat.app.core.crypto.canonicalSignalDeviceId
+import com.nexchat.app.core.db.AttachmentChunkEntity
+import com.nexchat.app.core.db.AttachmentEntity
+import com.nexchat.app.core.db.AttachmentState
 import com.nexchat.app.core.db.CallHistoryEntity
+import com.nexchat.app.core.db.CallOutboxEntity
 import com.nexchat.app.core.db.ContactEntity
 import com.nexchat.app.core.db.ConversationEntity
 import com.nexchat.app.core.db.GroupEntity
@@ -36,6 +41,7 @@ import com.nexchat.app.core.network.RotateKeysRequest
 import com.nexchat.app.core.network.SessionExpiredException
 import com.nexchat.app.core.settings.SettingsStore
 import java.io.IOException
+import java.security.MessageDigest
 import java.time.Instant
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
@@ -57,6 +63,13 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
+/** A file selected by the user, read into memory by the UI before encryption. */
+data class AttachmentDraft(
+    val fileName: String,
+    val mimeType: String,
+    val bytes: ByteArray,
+)
+
 data class TypingEvent(val conversationId: String, val fromNexId: String, val active: Boolean)
 
 data class IncomingMessageEvent(val conversation: ConversationEntity, val message: MessageEntity)
@@ -76,6 +89,7 @@ sealed interface CallSignalEvent {
         override val sentAt: Long,
         val displayName: String?,
         val sdp: String,
+        val video: Boolean = false,
     ) : CallSignalEvent
     data class Answer(
         override val conversationId: String,
@@ -84,6 +98,7 @@ sealed interface CallSignalEvent {
         override val callId: String,
         override val sentAt: Long,
         val sdp: String,
+        val video: Boolean = false,
     ) : CallSignalEvent
     data class Ice(
         override val conversationId: String,
@@ -124,6 +139,12 @@ sealed interface ChatEvent {
 
 private data class Target(val nexId: String, val signalDeviceId: Int, val bundle: KeyBundle?)
 
+private class CallSendPlan(
+    val row: CallOutboxEntity,
+    val content: SecureContent,
+    val targets: MutableList<Target> = mutableListOf(),
+)
+
 class ChatRepository(
     private val db: NexDatabase,
     private val api: ApiClient,
@@ -137,11 +158,14 @@ class ChatRepository(
     private val groupDao = db.groupDao()
     private val outboxDao = db.outboxDao()
     private val intentDao = db.pendingIntentDao()
+    private val callOutboxDao = db.callOutboxDao()
     private val processedDao = db.processedEnvelopeDao()
     private val callHistoryDao = db.callHistoryDao()
+    private val attachmentDao = db.attachmentDao()
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true; explicitNulls = false }
 
     private val sendMutex = Mutex()
+    private val callSendMutex = Mutex()
     private val receiveMutex = Mutex()
     private val replenishMutex = Mutex()
     @Volatile private var lastPreKeyCheckAt = 0L
@@ -257,6 +281,136 @@ class ChatRepository(
             }
         }
 
+    /**
+     * Sends a file as a set of independently encrypted, durable envelopes.
+     *
+     * The file is split so every Signal ciphertext stays below the relay's
+     * envelope limit. The manifest carries the name, size and SHA-256; chunks
+     * carry raw bytes as base64 inside the encrypted content. Plaintext lives
+     * only in SQLCipher until the user opens or saves the attachment.
+     */
+    suspend fun sendAttachment(
+        conversationId: String,
+        draft: AttachmentDraft,
+        replyTo: MessageEntity? = null,
+    ) = withContext(Dispatchers.IO) {
+        if (draft.bytes.isEmpty()) throw CryptoException("The selected file is empty")
+        if (draft.bytes.size > MAX_ATTACHMENT_BYTES) {
+            throw CryptoException("Attachments must be ${MAX_ATTACHMENT_BYTES / (1024 * 1024)} MB or smaller")
+        }
+        val conversation = conversationDao.get(conversationId)
+            ?: throw CryptoException("This conversation no longer exists")
+        if (conversation.type == "DM") {
+            val peer = conversation.peerNexId
+            if (peer != null && contactDao.get(peer)?.blocked == true) {
+                throw CryptoException("Unblock this contact before sending files")
+            }
+        }
+        val profile = profileDao.get() ?: throw CryptoException("Your local profile is missing")
+        val fileName = draft.fileName.ifBlank { "attachment" }.take(180)
+        val mimeType = draft.mimeType.ifBlank { "application/octet-stream" }
+        val attachmentId = UUID.randomUUID().toString()
+        val digest = sha256(draft.bytes)
+        val now = System.currentTimeMillis()
+        val chunkCount = (draft.bytes.size + ATTACHMENT_CHUNK_BYTES - 1) / ATTACHMENT_CHUNK_BYTES
+        val body = attachmentBody(fileName, AttachmentState.SENDING, 0, chunkCount)
+        val message = MessageEntity(
+            id = attachmentId,
+            conversationId = conversationId,
+            senderNexId = profile.nexId,
+            senderDisplayName = profile.displayName,
+            outgoing = true,
+            body = body,
+            kind = MessageKind.ATTACHMENT,
+            status = MessageStatus.PENDING,
+            sentAt = now,
+            replyToId = replyTo?.id,
+            replyToPreview = replyTo?.body?.take(160),
+        )
+        val attachment = AttachmentEntity(
+            id = attachmentId,
+            fileName = fileName,
+            mimeType = mimeType,
+            fileSize = draft.bytes.size.toLong(),
+            sha256 = digest,
+            chunkCount = chunkCount,
+            state = AttachmentState.SENDING,
+            createdAt = now,
+        )
+        val manifest = baseContent(
+            ContentKind.ATTACHMENT_MANIFEST,
+            attachmentId,
+            profile.toSenderInfo(),
+        ).copy(
+            attachmentId = attachmentId,
+            fileName = fileName,
+            mimeType = mimeType,
+            fileSize = draft.bytes.size.toLong(),
+            sha256 = digest,
+            chunkCount = chunkCount,
+            text = body,
+            replyToId = replyTo?.id,
+            replyPreview = replyTo?.body?.take(160),
+        )
+        val chunks = mutableListOf<AttachmentChunkEntity>()
+        val chunkContents = mutableListOf<SecureContent>()
+        for (index in 0 until chunkCount) {
+            val start = index * ATTACHMENT_CHUNK_BYTES
+            val bytes = draft.bytes.copyOfRange(start, minOf(start + ATTACHMENT_CHUNK_BYTES, draft.bytes.size))
+            val clientId = UUID.randomUUID().toString()
+            chunks += AttachmentChunkEntity(attachmentId, index, clientId, bytes, now)
+            chunkContents += baseContent(
+                ContentKind.ATTACHMENT_CHUNK,
+                clientId,
+                profile.toSenderInfo(),
+            ).copy(
+                attachmentId = attachmentId,
+                chunkIndex = index,
+                chunkCount = chunkCount,
+                chunkData = Base64.encodeToString(bytes, Base64.NO_WRAP),
+            )
+        }
+        db.withTransaction {
+            messageDao.upsert(message)
+            attachmentDao.upsert(attachment)
+            chunks.forEach { attachmentDao.insertChunk(it) }
+            conversationDao.touch(
+                conversationId,
+                previewForMessage(body, conversation.type == "GROUP"),
+                now,
+            )
+            enqueueIntent(conversation, manifest)
+            chunkContents.forEach { enqueueIntent(conversation, it) }
+        }
+        try {
+            flushOutbox()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            // The intents and plaintext chunks are durable in SQLCipher; the
+            // normal outbox retry loop will finish the transfer later.
+        }
+    }
+
+    /** Reassembles a completed attachment for the local file-picker/open flow. */
+    suspend fun loadAttachment(id: String): Pair<AttachmentEntity, ByteArray>? =
+        withContext(Dispatchers.IO) {
+            val attachment = attachmentDao.get(id) ?: return@withContext null
+            if (attachment.state != AttachmentState.READY) return@withContext null
+            val chunks = attachmentDao.chunks(id)
+            if (chunks.size != attachment.chunkCount) return@withContext null
+            val out = ByteArray(attachment.fileSize.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+            var offset = 0
+            for (chunk in chunks) {
+                val size = minOf(chunk.data.size, out.size - offset)
+                if (size <= 0) return@withContext null
+                System.arraycopy(chunk.data, 0, out, offset, size)
+                offset += size
+            }
+            if (offset != out.size || sha256(out) != attachment.sha256) return@withContext null
+            attachment to out
+        }
+
     suspend fun editMessage(conversationId: String, messageId: String, text: String) =
         withContext(Dispatchers.IO) {
             val message = messageDao.get(messageId) ?: return@withContext
@@ -281,6 +435,10 @@ class ChatRepository(
             return@withContext
         }
         val now = System.currentTimeMillis()
+        if (message.kind == MessageKind.ATTACHMENT) {
+            attachmentDao.deleteChunks(messageId)
+            attachmentDao.delete(messageId)
+        }
         messageDao.applyDeleteForEveryone(messageId, now)
         val conversation = conversationDao.get(conversationId) ?: return@withContext
         val profile = profileDao.get() ?: return@withContext
@@ -350,6 +508,199 @@ class ChatRepository(
             )
             if (durable) sendControl(conversation, filled) else runCatching { sendEphemeral(conversation, filled) }
         }
+
+    /**
+     * Queues an SDP/ICE signal on the dedicated call queue and attempts it
+     * immediately. Unlike ordinary messages, a call signal is worthless after
+     * the ring/connect timeout, so it must never inherit the message outbox's
+     * five-second-to-fifteen-minute retry schedule.
+     *
+     * Persisting the sealed signal (rather than only firing it inline) covers a
+     * brief network handoff without keeping the caller staring at
+     * "Connecting" for minutes.
+     */
+    suspend fun sendCallSignalFast(
+        conversationId: String,
+        content: SecureContent,
+        targetSignalDeviceId: Int? = null,
+    ) = withContext(Dispatchers.IO) {
+        val conversation = conversationDao.get(conversationId) ?: return@withContext
+        if (conversation.type != "DM") return@withContext
+        val peer = conversation.peerNexId ?: return@withContext
+        if (contactDao.get(peer)?.blocked == true) return@withContext
+        if (content.callId.isNullOrBlank()) return@withContext
+        val profile = profileDao.get() ?: return@withContext
+        val now = System.currentTimeMillis()
+        val filled = content.copy(
+            clientId = content.clientId ?: UUID.randomUUID().toString(),
+            senderNexId = profile.nexId,
+            senderUsername = profile.username,
+            senderDisplayName = profile.displayName,
+            senderAvatar = profile.avatar,
+            timestamp = if (content.timestamp > 0) content.timestamp else now,
+        )
+        val ttl = when (filled.kind) {
+            ContentKind.CALL_HANGUP,
+            ContentKind.CALL_REJECT,
+            -> TERMINAL_CALL_SIGNAL_TTL_MILLIS
+            else -> CALL_SIGNAL_TTL_MILLIS
+        }
+        callOutboxDao.upsert(
+            CallOutboxEntity(
+                id = UUID.randomUUID().toString(),
+                callId = filled.callId!!,
+                kind = filled.kind,
+                conversationId = conversationId,
+                contentJson = json.encodeToString(SecureContent.serializer(), filled),
+                targetSignalDeviceId = targetSignalDeviceId,
+                createdAt = now,
+                expiresAt = now + ttl,
+            ),
+        )
+        flushCallSignals()
+    }
+
+    /**
+     * Materializes and sends due call signals using a one-second retry cadence.
+     * The queue is bounded by its TTL, so a stale offer/ICE candidate can never
+     * ring a phone minutes later.
+     */
+    suspend fun flushCallSignals(): Boolean = withContext(Dispatchers.IO) {
+        callSendMutex.withLock {
+            val now = System.currentTimeMillis()
+            callOutboxDao.deleteExpired(now)
+            val pending = callOutboxDao.due(now, MAX_CALL_SIGNAL_BATCH)
+            if (pending.isEmpty()) return@withLock true
+            val plans = mutableListOf<CallSendPlan>()
+            val envelopes = mutableListOf<OutgoingEnvelope>()
+            for (row in pending) {
+                val content = runCatching {
+                    json.decodeFromString(SecureContent.serializer(), row.contentJson)
+                }.getOrNull()
+                val conversation = conversationDao.get(row.conversationId)
+                val peer = conversation?.peerNexId
+                if (content == null || peer == null) {
+                    callOutboxDao.delete(row.id)
+                    continue
+                }
+                val targets = try {
+                    resolveTargets(peer)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Throwable) {
+                    scheduleCallRetry(listOf(row), error, now)
+                    continue
+                }
+                val selected = row.targetSignalDeviceId?.let { wanted ->
+                    val canonical = canonicalSignalDeviceId(wanted)
+                    targets.filter { canonicalSignalDeviceId(it.signalDeviceId) == canonical }
+                        .ifEmpty { targets }
+                } ?: targets
+                val plan = CallSendPlan(row, content)
+                for (target in selected) {
+                    try {
+                        val payload = crypto.encrypt(content, target.nexId, target.signalDeviceId, target.bundle)
+                        plan.targets += target
+                        envelopes += OutgoingEnvelope(
+                            recipientNexId = target.nexId,
+                            recipientSignalDeviceId = target.signalDeviceId,
+                            clientId = content.clientId ?: row.id,
+                            ciphertext = payload.ciphertext,
+                            cipherType = payload.cipherType,
+                            ephemeral = false,
+                            // Priority lets the relay serve call SDP/ICE before
+                            // older, undecryptable message envelopes. Keep the
+                            // 10s floor so older relays still accept the TTL.
+                            priority = true,
+                            expiresInSeconds = (((row.expiresAt - now) / 1000L)
+                                .coerceIn(10L, MAX_ENVELOPE_TTL_SECONDS)).toInt(),
+                            groupId = null,
+                        )
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Throwable) {
+                        scheduleCallRetry(listOf(row), error, now)
+                    }
+                }
+                if (plan.targets.isNotEmpty()) plans += plan
+            }
+            if (envelopes.isEmpty()) return@withLock true
+
+            val response = try {
+                api.sendEnvelopes(envelopes)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (error is SessionExpiredException) throw error
+                scheduleCallRetry(plans.map { it.row }, error, now)
+                return@withLock false
+            }
+
+            val accepted = response.accepted.map {
+                it.clientId to canonicalSignalDeviceId(it.recipientSignalDeviceId)
+            }.toSet()
+            val skipped = response.skipped.associateBy {
+                it.clientId to canonicalSignalDeviceId(it.recipientSignalDeviceId ?: 0)
+            }
+            val retryRows = mutableListOf<CallOutboxEntity>()
+            for (plan in plans) {
+                var retry = false
+                var drop = false
+                for (target in plan.targets) {
+                    val key = (plan.content.clientId ?: plan.row.id) to
+                        canonicalSignalDeviceId(target.signalDeviceId)
+                    if (key in accepted) continue
+                    when (skipped[key]?.reason) {
+                        "DEVICE_NOT_ACTIVE" -> {
+                            invalidateDeviceCache(target.nexId)
+                            retry = true
+                        }
+                        "RECIPIENT_NOT_FOUND" -> drop = true
+                        else -> retry = true
+                    }
+                }
+                when {
+                    drop -> callOutboxDao.delete(plan.row.id)
+                    retry -> retryRows += plan.row
+                    else -> callOutboxDao.delete(plan.row.id)
+                }
+            }
+            if (retryRows.isNotEmpty()) {
+                scheduleCallRetry(retryRows, null, now)
+                return@withLock false
+            }
+            true
+        }
+    }
+
+    private suspend fun scheduleCallRetry(
+        rows: List<CallOutboxEntity>,
+        error: Throwable?,
+        now: Long,
+    ) {
+        val message = error?.let { sendFailureMessage(it) }
+        for (row in rows) {
+            if (row.expiresAt <= now) {
+                callOutboxDao.delete(row.id)
+                continue
+            }
+            callOutboxDao.markAttempt(
+                row.id,
+                now,
+                now + callRetryDelay(row.attempts + 1),
+                message,
+            )
+        }
+    }
+
+    private fun callRetryDelay(attempts: Int): Long {
+        val exponent = (attempts - 1).coerceIn(0, 5)
+        return (CALL_RETRY_BASE_MILLIS shl exponent).coerceAtMost(CALL_RETRY_MAX_MILLIS)
+    }
+
+    suspend fun clearCallSignals(callId: String) = withContext(Dispatchers.IO) {
+        callOutboxDao.deleteForCall(callId)
+    }
 
     /**
      * Materializes queued intents, then sends every due encrypted envelope.
@@ -537,6 +888,16 @@ class ChatRepository(
             parseTimestamp(accepted.deliveredAt)?.let { deliveredAt ->
                 messageDao.markDelivered(row.clientId, deliveredAt)
             }
+            val chunk = attachmentDao.chunkByClientId(row.clientId)
+            if (chunk != null) {
+                attachmentDao.markChunkSent(row.clientId)
+                if (attachmentDao.unsentChunkCount(chunk.attachmentId) == 0) {
+                    attachmentDao.setState(chunk.attachmentId, AttachmentState.READY)
+                    attachmentDao.get(chunk.attachmentId)?.let { attachment ->
+                        messageDao.updateBody(attachment.id, "📎 ${attachment.fileName}")
+                    }
+                }
+            }
         }
 
         var failed = false
@@ -718,6 +1079,7 @@ class ChatRepository(
         runCatching { syncGroups() }
         runCatching { fetchReceipts() }
         runCatching { receivePending() }
+        runCatching { flushCallSignals() }
         runCatching { flushOutbox() }
         runCatching { replenishPreKeysIfNeeded() }
     }
@@ -731,11 +1093,24 @@ class ChatRepository(
     suspend fun pollPending() = withContext(Dispatchers.IO) {
         runCatching { receivePending() }
         runCatching { fetchReceipts() }
+        runCatching { flushCallSignals() }
         runCatching { flushOutbox() }
         // Replenish even while the socket stays open. A recipient that remains
         // connected would otherwise never publish new one-time prekeys.
         runCatching { replenishPreKeysIfNeeded() }
     }
+
+    /**
+     * Holds the request open until ciphertext arrives. Serverless relays may
+     * run the sender and recipient on different function instances, so the
+     * in-memory WebSocket push can miss; this returns immediately when a call
+     * signal appears instead of waiting for a fixed background poll interval.
+     */
+    suspend fun waitForPending(timeoutMs: Int = LONG_POLL_TIMEOUT_MILLIS) =
+        withContext(Dispatchers.IO) {
+            val response = api.waitForEnvelopes(timeoutMs)
+            processPending(response.messages)
+        }
 
     /**
      * Fetch queued ciphertext without syncing anything else. Call signaling
@@ -744,6 +1119,7 @@ class ChatRepository(
      */
     suspend fun pollIncoming() = withContext(Dispatchers.IO) {
         receivePending()
+        flushCallSignals()
     }
 
     /**
@@ -771,9 +1147,12 @@ class ChatRepository(
     }
 
     private suspend fun receivePending() {
-        val response = api.pendingEnvelopes()
+        processPending(api.pendingEnvelopes().messages)
+    }
+
+    private suspend fun processPending(messages: List<EnvelopeDto>) {
         val ackIds = mutableListOf<String>()
-        for (envelope in response.messages) {
+        for (envelope in messages) {
             val handled = receiveEnvelope(envelope, acknowledge = false)
             if (handled) ackIds += envelope.id
         }
@@ -837,9 +1216,13 @@ class ChatRepository(
                     content.timestamp.takeIf { time -> time > 0 } ?: System.currentTimeMillis(),
                 )
             }
-            ContentKind.DELETE -> content.targetClientId?.let {
+            ContentKind.DELETE -> content.targetClientId?.let { id ->
+                if (messageDao.get(id)?.kind == MessageKind.ATTACHMENT) {
+                    attachmentDao.deleteChunks(id)
+                    attachmentDao.delete(id)
+                }
                 messageDao.applyDeleteForEveryone(
-                    it,
+                    id,
                     content.timestamp.takeIf { time -> time > 0 } ?: System.currentTimeMillis(),
                 )
             }
@@ -859,6 +1242,8 @@ class ChatRepository(
                 )
             }
             ContentKind.GROUP_META -> handleGroupMeta(content, senderNexId)
+            ContentKind.ATTACHMENT_MANIFEST -> handleIncomingAttachmentManifest(envelope, content, senderNexId)
+            ContentKind.ATTACHMENT_CHUNK -> handleIncomingAttachmentChunk(content)
             ContentKind.CALL_OFFER -> emitCallSignal(envelope, content) { cid, callId, sentAt ->
                 content.sdp?.let {
                     CallSignalEvent.Offer(
@@ -869,6 +1254,7 @@ class ChatRepository(
                         sentAt = sentAt,
                         displayName = content.senderDisplayName,
                         sdp = it,
+                        video = content.video == true,
                     )
                 }
             }
@@ -881,6 +1267,7 @@ class ChatRepository(
                         callId,
                         sentAt,
                         it,
+                        video = content.video == true,
                     )
                 }
             }
@@ -1015,6 +1402,140 @@ class ChatRepository(
             conversationDao.incrementUnread(conversation.id, now)
         }
         _events.tryEmit(ChatEvent.Incoming(IncomingMessageEvent(conversation, message)))
+    }
+
+    private suspend fun handleIncomingAttachmentManifest(
+        envelope: EnvelopeDto,
+        content: SecureContent,
+        senderNexId: String,
+    ) {
+        val contact = contactDao.get(senderNexId)
+        if (contact?.blocked == true) return
+        val id = content.attachmentId?.takeIf { it.isNotBlank() } ?: return
+        val fileName = content.fileName?.takeIf { it.isNotBlank() }?.take(180) ?: return
+        val mimeType = content.mimeType?.takeIf { it.isNotBlank() } ?: "application/octet-stream"
+        val fileSize = content.fileSize ?: return
+        val digest = content.sha256?.takeIf { SHA256_PATTERN.matches(it) } ?: return
+        val chunkCount = content.chunkCount ?: return
+        if (fileSize <= 0L || fileSize > MAX_ATTACHMENT_BYTES) return
+        val maxChunks = (MAX_ATTACHMENT_BYTES + ATTACHMENT_CHUNK_BYTES - 1) / ATTACHMENT_CHUNK_BYTES
+        if (chunkCount <= 0 || chunkCount > maxChunks) return
+        val conversation = ensureConversationFor(envelope, content, senderNexId)
+        val now = System.currentTimeMillis()
+        val existing = attachmentDao.get(id)
+        val received = attachmentDao.chunkCount(id)
+        val state = if (existing?.state == AttachmentState.READY) {
+            AttachmentState.READY
+        } else {
+            AttachmentState.RECEIVING
+        }
+        val body = attachmentBody(fileName, state, minOf(received, chunkCount), chunkCount)
+        val message = MessageEntity(
+            id = id,
+            conversationId = conversation.id,
+            senderNexId = senderNexId,
+            senderDisplayName = content.senderDisplayName ?: contact?.displayName ?: senderNexId,
+            outgoing = false,
+            body = body,
+            kind = MessageKind.ATTACHMENT,
+            status = MessageStatus.DELIVERED,
+            sentAt = content.timestamp.takeIf { it > 0 }
+                ?: parseTimestamp(envelope.createdAt) ?: now,
+            receivedAt = now,
+            replyToId = content.replyToId,
+            replyToPreview = content.replyPreview,
+        )
+        val inserted = messageDao.insertIgnore(message)
+        if (existing == null) {
+            attachmentDao.upsert(
+                AttachmentEntity(
+                    id = id,
+                    fileName = fileName,
+                    mimeType = mimeType,
+                    fileSize = fileSize,
+                    sha256 = digest,
+                    chunkCount = chunkCount,
+                    state = state,
+                    createdAt = now,
+                ),
+            )
+        } else {
+            messageDao.updateBody(id, body)
+        }
+        if (received >= chunkCount) finalizeAttachmentIfComplete(id)
+        if (inserted == -1L) return
+        conversationDao.touchIfNewer(
+            conversation.id,
+            previewForMessage(body, conversation.type == "GROUP"),
+            message.sentAt,
+        )
+        if (_activeConversation.value != conversation.id) {
+            conversationDao.incrementUnread(conversation.id, now)
+        }
+        _events.tryEmit(ChatEvent.Incoming(IncomingMessageEvent(conversation, message)))
+    }
+
+    private suspend fun handleIncomingAttachmentChunk(content: SecureContent) {
+        val id = content.attachmentId?.takeIf { it.isNotBlank() } ?: return
+        val index = content.chunkIndex ?: return
+        val encoded = content.chunkData ?: return
+        val bytes = runCatching { Base64.decode(encoded, Base64.NO_WRAP) }.getOrNull() ?: return
+        if (bytes.isEmpty() || bytes.size > ATTACHMENT_CHUNK_BYTES) return
+        val declaredCount = content.chunkCount ?: 1
+        if (index < 0 || index >= declaredCount) return
+        val attachment = attachmentDao.get(id)
+        if (attachment != null && index >= attachment.chunkCount) return
+        // A chunk can arrive before its manifest on a different relay instance.
+        // Keep it in SQLCipher and let the manifest reconciliation finish it.
+        attachmentDao.insertChunk(
+            AttachmentChunkEntity(
+                attachmentId = id,
+                index = index,
+                clientId = content.clientId ?: UUID.randomUUID().toString(),
+                data = bytes,
+                createdAt = System.currentTimeMillis(),
+                sent = true,
+            ),
+        )
+        if (attachment == null) return
+        val received = attachmentDao.chunkCount(id)
+        messageDao.updateBody(
+            id,
+            attachmentBody(attachment.fileName, AttachmentState.RECEIVING, minOf(received, attachment.chunkCount), attachment.chunkCount),
+        )
+        if (received < attachment.chunkCount) return
+        finalizeAttachmentIfComplete(id)
+    }
+
+    private suspend fun finalizeAttachmentIfComplete(id: String) {
+        val attachment = attachmentDao.get(id) ?: return
+        val chunks = attachmentDao.chunks(id)
+        if (chunks.size < attachment.chunkCount) return
+        val assembled = ByteArray(attachment.fileSize.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+        var offset = 0
+        for (chunk in chunks.sortedBy { it.index }) {
+            val size = minOf(chunk.data.size, assembled.size - offset)
+            if (size <= 0) {
+                attachmentDao.setState(id, AttachmentState.FAILED)
+                messageDao.updateBody(
+                    id,
+                    attachmentBody(attachment.fileName, AttachmentState.FAILED, chunks.size, attachment.chunkCount),
+                )
+                return
+            }
+            System.arraycopy(chunk.data, 0, assembled, offset, size)
+            offset += size
+        }
+        val state = if (offset == assembled.size && sha256(assembled) == attachment.sha256) {
+            AttachmentState.READY
+        } else {
+            AttachmentState.FAILED
+        }
+        attachmentDao.setState(id, state)
+        messageDao.updateBody(
+            id,
+            attachmentBody(attachment.fileName, state, chunks.size, attachment.chunkCount),
+        )
     }
 
     private suspend fun ensureConversationFor(
@@ -1607,11 +2128,19 @@ class ChatRepository(
         withContext(Dispatchers.IO) { conversationDao.setDraft(id, draft) }
 
     suspend fun clearConversation(id: String) = withContext(Dispatchers.IO) {
+        messageDao.allForConversation(id)
+            .filter { it.kind == MessageKind.ATTACHMENT }
+            .forEach { attachmentDao.deleteChunks(it.id); attachmentDao.delete(it.id) }
         messageDao.deleteConversation(id)
         conversationDao.updateLastMessage(id, "", System.currentTimeMillis())
     }
 
     suspend fun deleteLocalMessage(messageId: String) = withContext(Dispatchers.IO) {
+        val message = messageDao.get(messageId)
+        if (message?.kind == MessageKind.ATTACHMENT) {
+            attachmentDao.deleteChunks(messageId)
+            attachmentDao.delete(messageId)
+        }
         messageDao.deleteLocally(messageId)
     }
 
@@ -1648,6 +2177,22 @@ class ChatRepository(
             createdAt = now,
             updatedAt = now,
         ).also { conversationDao.upsert(it) }
+    }
+
+    private fun sha256(bytes: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+
+    private fun attachmentBody(
+        fileName: String,
+        state: String,
+        received: Int,
+        total: Int,
+    ): String = when (state) {
+        AttachmentState.SENDING -> "📎 $fileName · sending…"
+        AttachmentState.RECEIVING -> "📎 $fileName · receiving $received/$total"
+        AttachmentState.READY -> "📎 $fileName · ready"
+        AttachmentState.FAILED -> "📎 $fileName · transfer failed"
+        else -> "📎 $fileName"
     }
 
     private fun baseContent(kind: String, clientId: String, sender: SenderInfo): SecureContent =
@@ -1715,8 +2260,20 @@ private val reactionsSerializer = MapSerializer(
 private const val DEVICE_CACHE_MILLIS = 60_000L
 private const val PRE_KEY_CHECK_INTERVAL_MILLIS = 60_000L
 private const val MAX_SEND_BATCH = 100
+private const val MAX_CALL_SIGNAL_BATCH = 60
 private const val RETRY_BASE_MILLIS = 5_000L
 private const val RETRY_MAX_MILLIS = 15L * 60 * 1000
 private const val MAX_ENVELOPE_TTL_SECONDS = 7L * 24 * 3600
 private const val MESSAGE_TTL_MILLIS = MAX_ENVELOPE_TTL_SECONDS * 1000L
-private const val CALL_SIGNAL_TTL_MILLIS = 3L * 60 * 1000
+// A call offer is only useful while the caller is still ringing. Keeping it
+// alive for minutes produced delayed rings and "Accept" on an ended call.
+private const val CALL_SIGNAL_TTL_MILLIS = 45L * 1000
+private const val TERMINAL_CALL_SIGNAL_TTL_MILLIS = 60L * 1000
+private const val CALL_RETRY_BASE_MILLIS = 750L
+private const val CALL_RETRY_MAX_MILLIS = 8_000L
+private const val LONG_POLL_TIMEOUT_MILLIS = 20_000
+// 90 KiB raw is ~120 KiB as base64. Together with JSON and Signal overhead it
+// stays safely below the relay's 131,072-byte ciphertext limit.
+private const val ATTACHMENT_CHUNK_BYTES = 90 * 1024
+const val MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+private val SHA256_PATTERN = Regex("^[a-f0-9]{64}$")

@@ -62,6 +62,7 @@ class WebSocketManager(
     private var socket: WebSocket? = null
     private var loop: Job? = null
     private var poller: Job? = null
+    private var callPoller: Job? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     @Volatile
@@ -69,14 +70,42 @@ class WebSocketManager(
 
     fun start() {
         if (!running.compareAndSet(false, true)) return
-        // The relay may serve sockets from more than one instance. Poll as a
-        // delivery fallback so a missed push never strands ciphertext. A short
-        // interval matters for calls: an offer that waits 20 seconds feels
-        // broken even though it eventually rings.
+        // The relay may serve sockets from more than one instance. A long poll
+        // closes the gap: the server holds the request open and answers the
+        // instant ciphertext exists, so a call offer never waits for a fixed
+        // five-second poll tick. The WebSocket remains the primary path.
         poller = scope.launch {
+            var failures = 0
             while (isActive && running.get()) {
-                runCatching { chat.pollPending() }
-                delay(POLL_INTERVAL_MILLIS)
+                val result = runCatching { chat.waitForPending(LONG_POLL_TIMEOUT_MILLIS) }
+                if (result.isSuccess) {
+                    failures = 0
+                    runCatching { chat.fetchReceipts() }
+                    runCatching { chat.flushOutbox() }
+                    runCatching { chat.flushCallSignals() }
+                    continue
+                }
+                val error = result.exceptionOrNull()
+                if (error is ApiException && error.statusCode == 404) {
+                    // Older relay without the long-poll route: keep working,
+                    // just at the previous cadence.
+                    runCatching { chat.pollPending() }
+                    delay(FALLBACK_POLL_INTERVAL_MILLIS)
+                    continue
+                }
+                failures = (failures + 1).coerceAtMost(2)
+                // A cold serverless instance can fail one long poll. Waiting
+                // 3-5 seconds here is what made incoming calls appear minutes
+                // late; never back off this path beyond two seconds.
+                delay(500L * failures)
+            }
+        }
+        // SDP/ICE retries are useless after the ring/connect window, so flush
+        // this queue on a short fixed cadence while a session is signed in.
+        callPoller = scope.launch {
+            while (isActive && running.get()) {
+                runCatching { chat.flushCallSignals() }
+                delay(CALL_SIGNAL_FLUSH_INTERVAL_MILLIS)
             }
         }
         registerNetworkCallback()
@@ -121,6 +150,8 @@ class WebSocketManager(
         loop = null
         poller?.cancel()
         poller = null
+        callPoller?.cancel()
+        callPoller = null
         _state.value = ConnectionState.STOPPED
     }
 
@@ -202,6 +233,7 @@ class WebSocketManager(
                 // Drain ciphertext and intents that accumulated while offline
                 // immediately instead of waiting for the next poll tick.
                 scope.launch { runCatching { chat.flushOutbox() } }
+                scope.launch { runCatching { chat.flushCallSignals() } }
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -251,6 +283,8 @@ class WebSocketManager(
     }
 
     private companion object {
-        const val POLL_INTERVAL_MILLIS = 5_000L
+        const val LONG_POLL_TIMEOUT_MILLIS = 20_000
+        const val CALL_SIGNAL_FLUSH_INTERVAL_MILLIS = 1_000L
+        const val FALLBACK_POLL_INTERVAL_MILLIS = 3_000L
     }
 }

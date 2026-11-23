@@ -2,6 +2,7 @@ package com.nexchat.app.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -61,8 +62,10 @@ import com.nexchat.app.ui.components.ScreenTitle
 import com.nexchat.app.ui.components.SectionTitle
 import com.nexchat.app.ui.nexViewModel
 import com.nexchat.app.ui.theme.LocalNexPalette
+import com.nexchat.app.ui.theme.atSize
 import com.nexchat.app.ui.viewmodel.SettingsViewModel
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(
     onOpenProfile: () -> Unit,
@@ -117,8 +120,10 @@ fun SettingsScreen(
                             )
                             Text(
                                 profile?.nexId ?: "",
-                                style = MaterialTheme.typography.bodySmall.copy(letterSpacing = 0.8.sp),
+                                style = MaterialTheme.typography.bodySmall,
                                 color = palette.textMuted,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
                             )
                         }
                         Icon(
@@ -208,7 +213,10 @@ fun SettingsScreen(
                     corner = 22.dp,
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
                 ) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    androidx.compose.foundation.layout.FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
                         ThemeMode.entries.forEach { mode ->
                             FilterChip(
                                 label = when (mode) {
@@ -223,7 +231,7 @@ fun SettingsScreen(
                     }
                     Spacer(Modifier.height(10.dp))
                     Text(
-                        "The glass surfaces adapt to your choice. Midnight is the default for a quieter look.",
+                        "Choose how Nexchat looks. Your selection applies across every screen.",
                         style = MaterialTheme.typography.bodySmall,
                         color = palette.textSecondary,
                     )
@@ -295,9 +303,9 @@ fun SettingsScreen(
                     Spacer(Modifier.height(8.dp))
                     AboutLine("Local storage", "SQLCipher · Android Keystore")
                     Spacer(Modifier.height(8.dp))
-                    AboutLine("Calls & nearby", "Not included in this build")
+                    AboutLine("Calls & nearby", "Voice and video calls available · nearby not included")
                     Spacer(Modifier.height(8.dp))
-                    AboutLine("Attachments & transcription", "Not included in this build")
+                    AboutLine("Attachments & transcription", "Encrypted files up to 10 MB · transcription not included")
                 }
             }
             item {
@@ -415,13 +423,16 @@ internal fun SettingsAction(
                 title,
                 style = MaterialTheme.typography.titleMedium,
                 color = if (destructive) palette.danger else palette.textPrimary,
-                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
             if (!subtitle.isNullOrBlank()) {
                 Text(
                     subtitle,
                     style = MaterialTheme.typography.bodySmall,
                     color = if (destructive) palette.danger.copy(alpha = 0.72f) else palette.textMuted,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
         }
@@ -472,14 +483,17 @@ private fun ToggleRow(
         Column(Modifier.weight(1f)) {
             Text(
                 title,
-                style = MaterialTheme.typography.titleMedium.copy(fontSize = 15.sp),
+                style = MaterialTheme.typography.titleMedium.atSize(15.sp),
                 color = palette.textPrimary,
-                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
             Text(
                 subtitle,
-                style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
+                style = MaterialTheme.typography.bodySmall.atSize(11.sp),
                 color = palette.textMuted,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
             )
         }
         Spacer(Modifier.width(8.dp))
@@ -487,7 +501,7 @@ private fun ToggleRow(
             checked = checked,
             onCheckedChange = onCheckedChange,
             colors = SwitchDefaults.colors(
-                checkedThumbColor = Color.White,
+                checkedThumbColor = palette.onAccent,
                 checkedTrackColor = palette.accent,
                 checkedBorderColor = palette.accent,
                 uncheckedThumbColor = palette.textSecondary,
@@ -501,18 +515,22 @@ private fun ToggleRow(
 @Composable
 private fun AboutLine(label: String, value: String) {
     val palette = LocalNexPalette.current
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
         Text(
             label,
             style = MaterialTheme.typography.bodySmall,
             color = palette.textMuted,
-            modifier = Modifier.width(108.dp),
+            modifier = Modifier.weight(0.38f),
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
         )
         Text(
             value,
             style = MaterialTheme.typography.bodySmall,
             color = palette.textSecondary,
-            fontWeight = FontWeight.Medium,
+            modifier = Modifier.weight(0.62f),
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }

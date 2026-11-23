@@ -42,12 +42,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nexchat.app.core.network.AuthUser
-import com.nexchat.app.ui.components.Avatar
+import com.nexchat.app.ui.components.ContactListRow
 import com.nexchat.app.ui.components.EmptyState
 import com.nexchat.app.ui.components.GlassCard
 import com.nexchat.app.ui.components.GlassSearchField
@@ -132,11 +130,10 @@ fun AddContactScreen(
                 else -> LazyColumn(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                        start = 16.dp,
-                        end = 16.dp,
+                        start = 12.dp,
+                        end = 12.dp,
                         bottom = 100.dp,
                     ),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     items(results, key = { it.id }) { user ->
                         PersonRow(
@@ -166,29 +163,13 @@ fun AddContactScreen(
 @Composable
 private fun PersonRow(user: AuthUser, added: Boolean, onClick: () -> Unit) {
     val palette = LocalNexPalette.current
-    GlassCard(
-        corner = 22.dp,
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
-    ) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Avatar(name = user.displayName, avatar = user.avatar, size = 50.dp)
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    user.displayName,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = palette.textPrimary,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    "@${user.username} · ${user.nexId}",
-                    style = MaterialTheme.typography.bodySmall.copy(fontSize = 11.sp),
-                    color = palette.textMuted,
-                    maxLines = 1,
-                )
-            }
+    ContactListRow(
+        name = user.displayName,
+        subtitle = "@${user.username} · ${user.nexId}",
+        avatar = user.avatar,
+        avatarSize = 50.dp,
+        onClick = onClick,
+        trailing = {
             TextButton(onClick = onClick) {
                 Text(
                     if (added) "Message" else "Add",
@@ -196,8 +177,8 @@ private fun PersonRow(user: AuthUser, added: Boolean, onClick: () -> Unit) {
                     fontWeight = FontWeight.Bold,
                 )
             }
-        }
-    }
+        },
+    )
 }
 
 @Composable
@@ -250,35 +231,20 @@ fun NewGroupScreen(
             LazyColumn(
                 modifier = Modifier.weight(1f),
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                    start = 16.dp,
-                    end = 16.dp,
+                    start = 12.dp,
+                    end = 12.dp,
                     bottom = 12.dp,
                 ),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 items(contacts, key = { it.nexId }) { contact ->
                     val isSelected = selected.contains(contact.nexId)
-                    GlassCard(
-                        corner = 20.dp,
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(11.dp),
+                    ContactListRow(
+                        name = contact.displayName,
+                        subtitle = "@${contact.username} · ${contact.nexId}",
+                        avatar = contact.avatar,
+                        avatarSize = 46.dp,
                         onClick = { vm.toggle(contact.nexId) },
-                    ) {
-                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                            Avatar(name = contact.displayName, avatar = contact.avatar, size = 46.dp)
-                            Spacer(Modifier.width(12.dp))
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    contact.displayName,
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = palette.textPrimary,
-                                    fontWeight = FontWeight.SemiBold,
-                                )
-                                Text(
-                                    "@${contact.username}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = palette.textMuted,
-                                )
-                            }
+                        trailing = {
                             Box(
                                 Modifier
                                     .size(26.dp)
@@ -290,13 +256,13 @@ fun NewGroupScreen(
                                     Icon(
                                         Icons.Outlined.Check,
                                         contentDescription = "Selected",
-                                        tint = Color.White,
+                                        tint = palette.onAccent,
                                         modifier = Modifier.size(17.dp),
                                     )
                                 }
                             }
-                        }
-                    }
+                        },
+                    )
                 }
             }
         }

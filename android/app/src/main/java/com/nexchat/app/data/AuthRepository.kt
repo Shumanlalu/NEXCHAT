@@ -95,6 +95,8 @@ class AuthRepository(
             db.relayDao().deleteAll()
             db.processedEnvelopeDao().deleteAll()
             db.callHistoryDao().deleteAll()
+            db.attachmentDao().deleteAllChunks()
+            db.attachmentDao().deleteAll()
             db.signalStateDao().deleteAll()
         }
         crypto.reset()

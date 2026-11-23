@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -64,6 +65,7 @@ import com.nexchat.app.ui.components.StatusPill
 import com.nexchat.app.ui.formatListTime
 import com.nexchat.app.ui.nexViewModel
 import com.nexchat.app.ui.theme.LocalNexPalette
+import com.nexchat.app.ui.theme.atSize
 import com.nexchat.app.ui.viewmodel.ChatsViewModel
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -302,8 +304,8 @@ private fun ConversationRow(
                         conversation.title,
                         style = MaterialTheme.typography.titleMedium,
                         color = palette.textPrimary,
-                        fontWeight = FontWeight.Bold,
                         maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false),
                     )
                     if (conversation.pinned) {
@@ -330,11 +332,15 @@ private fun ConversationRow(
                 )
             }
             Spacer(Modifier.width(8.dp))
-            Column(horizontalAlignment = Alignment.End) {
+            Column(
+                modifier = Modifier.widthIn(min = 44.dp),
+                horizontalAlignment = Alignment.End,
+            ) {
                 Text(
                     formatListTime(conversation.lastMessageAt),
-                    style = MaterialTheme.typography.labelMedium.copy(fontSize = 10.sp),
+                    style = MaterialTheme.typography.labelSmall.atSize(11.sp),
                     color = if (conversation.unreadCount > 0) palette.accent else palette.textMuted,
+                    maxLines = 1,
                 )
                 Spacer(Modifier.height(6.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -358,9 +364,8 @@ private fun ConversationRow(
                         ) {
                             Text(
                                 conversation.unreadCount.coerceAtMost(99).toString(),
-                                color = androidx.compose.ui.graphics.Color.White,
-                                style = MaterialTheme.typography.labelMedium.copy(fontSize = 10.sp),
-                                fontWeight = FontWeight.Bold,
+                                color = palette.onAccent,
+                                style = MaterialTheme.typography.labelSmall.atSize(11.sp),
                             )
                         }
                     }

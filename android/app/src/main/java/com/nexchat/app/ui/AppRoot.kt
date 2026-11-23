@@ -31,6 +31,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -52,16 +53,21 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.nexchat.app.AppContainer
+import com.nexchat.app.BuildConfig
 import com.nexchat.app.NexChatApp
+import com.nexchat.app.core.config.RemoteConfigState
 import com.nexchat.app.data.AuthState
 import com.nexchat.app.service.MessagingService
+import com.nexchat.app.ui.components.AnnouncementBanner
 import com.nexchat.app.ui.components.ChromeNLogo
 import com.nexchat.app.ui.components.GlassCard
 import com.nexchat.app.ui.components.LoadingOrb
+import com.nexchat.app.ui.components.MaintenanceBanner
 import com.nexchat.app.ui.components.MainTabs
 import com.nexchat.app.ui.components.NexBottomBar
 import com.nexchat.app.ui.components.PrimaryButton
 import com.nexchat.app.ui.components.SilverBackground
+import com.nexchat.app.ui.components.UpdateRequiredScreen
 import com.nexchat.app.ui.screens.AddContactScreen
 import com.nexchat.app.ui.screens.ArchivedScreen
 import com.nexchat.app.ui.screens.AuthScreen
@@ -80,6 +86,7 @@ import com.nexchat.app.ui.screens.SettingsScreen
 import com.nexchat.app.ui.theme.LocalNexPalette
 import com.nexchat.app.ui.theme.NexChatTheme
 import com.nexchat.app.ui.viewmodel.AuthMode
+import kotlinx.coroutines.launch
 
 @Composable
 fun NexChatRoot(
@@ -91,6 +98,8 @@ fun NexChatRoot(
     val preferences by container.settings.state.collectAsStateWithLifecycle()
     val authState by container.auth.state.collectAsStateWithLifecycle()
     val startupError by container.startupError.collectAsStateWithLifecycle()
+    val remote by container.remoteConfig.state.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
 
     NexChatTheme(mode = preferences.themeMode) {
         when {
@@ -99,10 +108,15 @@ fun NexChatRoot(
                 onRetry = container::retryBootstrap,
             )
             authState is AuthState.Loading -> StartupLoadingScreen()
+            remote.loaded && container.remoteConfig.isUpdateRequired() -> UpdateRequiredScreen(
+                currentVersion = BuildConfig.VERSION_NAME,
+                minimumVersion = remote.minAppVersion,
+                onRetry = { scope.launch { container.remoteConfig.refresh() } },
+            )
             authState is AuthState.LoggedIn -> {
-                SessionForegroundService()
                 MainShell(
                     container = container,
+                    remote = remote,
                     initialConversationId = initialConversationId,
                     onConversationConsumed = onConversationConsumed,
                 )
@@ -216,20 +230,9 @@ private fun AuthFlow(onboarded: Boolean) {
 }
 
 @Composable
-private fun SessionForegroundService() {
-    val context = LocalContext.current
-    DisposableEffect(Unit) {
-        val intent = Intent(context, MessagingService::class.java)
-        runCatching { ContextCompat.startForegroundService(context, intent) }
-        onDispose {
-            runCatching { context.stopService(intent) }
-        }
-    }
-}
-
-@Composable
 private fun MainShell(
     container: AppContainer,
+    remote: RemoteConfigState,
     initialConversationId: String?,
     onConversationConsumed: () -> Unit,
 ) {
@@ -239,6 +242,25 @@ private fun MainShell(
     val route = backStackEntry?.destination?.route
     val showBottomBar = MainTabs.any { it.route == route }
     var askedForNotifications by rememberSaveable { mutableStateOf(false) }
+    var dismissedAnnouncementKey by rememberSaveable { mutableStateOf<String?>(null) }
+    val announcement = remote.announcement
+    val announcementKey = announcement?.let { "${it.title}\u0000${it.body}" }
+    val announcementVisible = announcement != null && (
+        announcement.severity == "critical" ||
+            (dismissedAnnouncementKey != announcementKey &&
+                !container.remoteConfig.isAnnouncementDismissed(announcement))
+        )
+    val dismissAnnouncement: (() -> Unit)? = if (announcement != null &&
+        announcement.severity != "critical"
+    ) {
+        {
+            container.remoteConfig.dismissAnnouncement(announcement)
+            dismissedAnnouncementKey = announcementKey
+        }
+    } else {
+        null
+    }
+    val showBanners = remote.maintenanceMode || announcementVisible
 
     val notificationPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -263,14 +285,38 @@ private fun MainShell(
     }
 
     SilverBackground {
-        Box(Modifier.fillMaxSize()) {
-            NavHost(
-                navController = nav,
-                startDestination = "chats",
-                modifier = Modifier
-                    .fillMaxSize()
-                    .statusBarsPadding(),
+        Column(Modifier.fillMaxSize()) {
+            if (showBanners) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    if (remote.maintenanceMode) {
+                        MaintenanceBanner(container.remoteConfig.maintenanceText())
+                    }
+                    if (announcementVisible && announcement != null) {
+                        AnnouncementBanner(
+                            announcement = announcement,
+                            onDismiss = dismissAnnouncement,
+                        )
+                    }
+                }
+            }
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
             ) {
+                NavHost(
+                    navController = nav,
+                    startDestination = "chats",
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .then(if (showBanners) Modifier else Modifier.statusBarsPadding()),
+                ) {
                 composable("chats") {
                     ChatsScreen(
                         onOpenConversation = { nav.navigate("chat/${Uri.encode(it)}") },
@@ -376,6 +422,7 @@ private fun MainShell(
                     onSelect = { nav.openTab(it) },
                     modifier = Modifier.align(Alignment.BottomCenter),
                 )
+            }
             }
         }
     }

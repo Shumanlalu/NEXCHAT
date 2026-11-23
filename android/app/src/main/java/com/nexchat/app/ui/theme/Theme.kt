@@ -2,7 +2,9 @@ package com.nexchat.app.ui.theme
 
 import android.app.Activity
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
@@ -15,11 +17,20 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
 import com.nexchat.app.core.settings.ThemeMode
 
+/**
+ * Nexchat's design tokens.
+ *
+ * The palette is deliberately different between light and dark: the light
+ * theme reads as calm paper with deep teal ink, while the dark theme reads as
+ * a deep ink surface with a restrained mint accent. They are tuned
+ * independently rather than being simple inversions.
+ */
 data class NexPalette(
     val dark: Boolean,
     val backgroundTop: Color,
@@ -35,6 +46,7 @@ data class NexPalette(
     val accent: Color,
     val accentDeep: Color,
     val accentSoft: Color,
+    val onAccent: Color,
     val bubbleIn: Color,
     val bubbleOutStart: Color,
     val bubbleOutEnd: Color,
@@ -47,133 +59,139 @@ data class NexPalette(
 
 val LightSilver = NexPalette(
     dark = false,
-    backgroundTop = Color(0xFFF7F8FB),
-    backgroundBottom = Color(0xFFC9D0DA),
-    glowBlue = Color(0x4A6C8AA6),
-    glowViolet = Color(0x3D8C96A3),
-    glass = Color(0xB8FFFFFF),
-    glassStrong = Color(0xF2FFFFFF),
-    glassBorder = Color(0xD9FFFFFF),
-    textPrimary = Color(0xFF12161C),
-    textSecondary = Color(0xFF4A525E),
-    textMuted = Color(0xFF78818E),
-    accent = Color(0xFF4E657D),
-    accentDeep = Color(0xFF34495E),
-    accentSoft = Color(0x1F4E657D),
-    bubbleIn = Color(0xE8FFFFFF),
-    bubbleOutStart = Color(0xFF667384),
-    bubbleOutEnd = Color(0xFF303945),
-    danger = Color(0xFFC24357),
-    success = Color(0xFF1F8A68),
-    divider = Color(0x2A2B3440),
-    navGlass = Color(0xF2FAFBFC),
-    silver = Color(0xFFC2CAD5),
+    backgroundTop = Color(0xFFF6F7F4),
+    backgroundBottom = Color(0xFFE8EBE6),
+    glowBlue = Color(0x0A1F6F63),
+    glowViolet = Color(0x081F6F63),
+    glass = Color(0xFFFFFFFF),
+    glassStrong = Color(0xFFFFFFFF),
+    glassBorder = Color(0x221F6F63),
+    textPrimary = Color(0xFF16201E),
+    textSecondary = Color(0xFF495651),
+    textMuted = Color(0xFF7A8782),
+    accent = Color(0xFF1F6F63),
+    accentDeep = Color(0xFF18574E),
+    accentSoft = Color(0x1F1F6F63),
+    onAccent = Color(0xFFFFFFFF),
+    bubbleIn = Color(0xFFFFFFFF),
+    bubbleOutStart = Color(0xFF25796D),
+    bubbleOutEnd = Color(0xFF1B5B52),
+    danger = Color(0xFFBE3F4E),
+    success = Color(0xFF137A5C),
+    divider = Color(0x1A16201E),
+    navGlass = Color(0xF5FFFFFF),
+    silver = Color(0xFFC9D1CB),
 )
 
 val DarkSilver = NexPalette(
     dark = true,
-    backgroundTop = Color(0xFF191D23),
-    backgroundBottom = Color(0xFF07090C),
-    glowBlue = Color(0x405D7C99),
-    glowViolet = Color(0x3D7D8794),
-    glass = Color(0x1FFFFFFF),
-    glassStrong = Color(0x30FFFFFF),
-    glassBorder = Color(0x3DFFFFFF),
-    textPrimary = Color(0xFFF3F5F8),
-    textSecondary = Color(0xFFC2C9D2),
-    textMuted = Color(0xFF858E9A),
-    accent = Color(0xFFB6C4D4),
-    accentDeep = Color(0xFF8493A5),
-    accentSoft = Color(0x2AB6C4D4),
-    bubbleIn = Color(0x16FFFFFF),
-    bubbleOutStart = Color(0xFF5D6A7A),
-    bubbleOutEnd = Color(0xFF262E38),
-    danger = Color(0xFFFF7A8A),
-    success = Color(0xFF56D5AE),
-    divider = Color(0x24FFFFFF),
-    navGlass = Color(0xC0161A20),
-    silver = Color(0xFFD3DAE4),
+    backgroundTop = Color(0xFF111A19),
+    backgroundBottom = Color(0xFF080D0D),
+    glowBlue = Color(0x0A3DD0B8),
+    glowViolet = Color(0x083DD0B8),
+    glass = Color(0xFF182320),
+    glassStrong = Color(0xFF1E2A27),
+    glassBorder = Color(0x26FFFFFF),
+    textPrimary = Color(0xFFEAF2EF),
+    textSecondary = Color(0xFFA9BAB5),
+    textMuted = Color(0xFF748680),
+    accent = Color(0xFF4BC4AC),
+    accentDeep = Color(0xFF2E9B85),
+    accentSoft = Color(0x264BC4AC),
+    onAccent = Color(0xFF062019),
+    bubbleIn = Color(0xFF1A2624),
+    bubbleOutStart = Color(0xFF1E655A),
+    bubbleOutEnd = Color(0xFF174B43),
+    danger = Color(0xFFFF7A86),
+    success = Color(0xFF52D4AB),
+    divider = Color(0x1FFFFFFF),
+    navGlass = Color(0xE6101716),
+    silver = Color(0xFFD3DED9),
 )
 
 val LocalNexPalette = staticCompositionLocalOf { LightSilver }
 
 private val lightColors = lightColorScheme(
     primary = LightSilver.accent,
-    onPrimary = Color.White,
-    primaryContainer = Color(0xFFDCE3EB),
-    onPrimaryContainer = Color(0xFF1B2633),
-    secondary = Color(0xFF7E8B99),
+    onPrimary = LightSilver.onAccent,
+    primaryContainer = Color(0xFFDCEAE6),
+    onPrimaryContainer = Color(0xFF12322D),
+    secondary = Color(0xFF5E716B),
     background = LightSilver.backgroundTop,
     onBackground = LightSilver.textPrimary,
-    surface = Color(0xFFF9FAFC),
+    surface = LightSilver.glass,
     onSurface = LightSilver.textPrimary,
-    surfaceVariant = Color(0xFFE3E7ED),
+    surfaceVariant = Color(0xFFE4E9E4),
     onSurfaceVariant = LightSilver.textSecondary,
     error = LightSilver.danger,
 )
 
 private val darkColors = darkColorScheme(
     primary = DarkSilver.accent,
-    onPrimary = Color(0xFF1A2330),
-    primaryContainer = Color(0xFF33404F),
-    onPrimaryContainer = Color(0xFFEAF0F6),
-    secondary = Color(0xFF9EABB9),
+    onPrimary = DarkSilver.onAccent,
+    primaryContainer = Color(0xFF1C3C35),
+    onPrimaryContainer = Color(0xFFD8F3EC),
+    secondary = Color(0xFF91A9A2),
     background = DarkSilver.backgroundTop,
     onBackground = DarkSilver.textPrimary,
-    surface = Color(0xFF1B2027),
+    surface = DarkSilver.glassStrong,
     onSurface = DarkSilver.textPrimary,
-    surfaceVariant = Color(0xFF262C34),
+    surfaceVariant = Color(0xFF22302D),
     onSurfaceVariant = DarkSilver.textSecondary,
     error = DarkSilver.danger,
 )
 
+/**
+ * A restrained type ramp. Tracking is kept close to zero so small labels and
+ * identifiers do not visually scatter, and every line box is proportional to
+ * its font size so baseline alignment stays predictable.
+ */
 val NexTypography = Typography(
     displayLarge = TextStyle(
         fontFamily = FontFamily.SansSerif,
-        fontWeight = FontWeight.Bold,
-        fontSize = 46.sp,
-        lineHeight = 50.sp,
-        letterSpacing = (-1.5).sp,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 40.sp,
+        lineHeight = 46.sp,
+        letterSpacing = (-0.5).sp,
     ),
     displayMedium = TextStyle(
         fontFamily = FontFamily.SansSerif,
-        fontWeight = FontWeight.Bold,
-        fontSize = 36.sp,
-        lineHeight = 41.sp,
-        letterSpacing = (-1).sp,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 30.sp,
+        lineHeight = 36.sp,
+        letterSpacing = (-0.3).sp,
     ),
     headlineLarge = TextStyle(
         fontFamily = FontFamily.SansSerif,
-        fontWeight = FontWeight.Bold,
-        fontSize = 30.sp,
-        lineHeight = 35.sp,
-        letterSpacing = (-0.6).sp,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 26.sp,
+        lineHeight = 32.sp,
+        letterSpacing = (-0.2).sp,
     ),
     headlineMedium = TextStyle(
         fontFamily = FontFamily.SansSerif,
-        fontWeight = FontWeight.Bold,
-        fontSize = 24.sp,
-        lineHeight = 29.sp,
-        letterSpacing = (-0.4).sp,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 22.sp,
+        lineHeight = 28.sp,
+        letterSpacing = (-0.1).sp,
     ),
     titleLarge = TextStyle(
         fontFamily = FontFamily.SansSerif,
-        fontWeight = FontWeight.Bold,
-        fontSize = 20.sp,
+        fontWeight = FontWeight.SemiBold,
+        fontSize = 19.sp,
         lineHeight = 25.sp,
-        letterSpacing = (-0.2).sp,
     ),
     titleMedium = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.SemiBold,
         fontSize = 16.sp,
-        lineHeight = 21.sp,
+        lineHeight = 22.sp,
     ),
     bodyLarge = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.Normal,
-        fontSize = 16.sp,
-        lineHeight = 23.sp,
+        fontSize = 15.sp,
+        lineHeight = 22.sp,
     ),
     bodyMedium = TextStyle(
         fontFamily = FontFamily.SansSerif,
@@ -183,25 +201,40 @@ val NexTypography = Typography(
     ),
     bodySmall = TextStyle(
         fontFamily = FontFamily.SansSerif,
-        fontWeight = FontWeight.Medium,
+        fontWeight = FontWeight.Normal,
         fontSize = 12.sp,
         lineHeight = 16.sp,
-        letterSpacing = 0.1.sp,
     ),
     labelLarge = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.SemiBold,
         fontSize = 14.sp,
-        lineHeight = 18.sp,
-        letterSpacing = 0.2.sp,
+        lineHeight = 19.sp,
     ),
     labelMedium = TextStyle(
         fontFamily = FontFamily.SansSerif,
-        fontWeight = FontWeight.SemiBold,
+        fontWeight = FontWeight.Medium,
         fontSize = 12.sp,
         lineHeight = 16.sp,
-        letterSpacing = 0.4.sp,
+        letterSpacing = 0.2.sp,
     ),
+    labelSmall = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.Medium,
+        fontSize = 11.sp,
+        lineHeight = 15.sp,
+        letterSpacing = 0.2.sp,
+    ),
+)
+
+/**
+ * Use this whenever an ad-hoc font size is unavoidable: it keeps the line box
+ * proportional to the glyph, which prevents the vertical misalignment that
+ * happens when `copy(fontSize = ...)` inherits a larger line height.
+ */
+fun TextStyle.atSize(size: TextUnit): TextStyle = copy(
+    fontSize = size,
+    lineHeight = size * 1.3f,
 )
 
 @Composable
@@ -226,12 +259,12 @@ fun NexChatTheme(mode: ThemeMode = ThemeMode.SYSTEM, content: @Composable () -> 
         MaterialTheme(
             colorScheme = if (dark) darkColors else lightColors,
             typography = NexTypography,
-            shapes = androidx.compose.material3.Shapes(
-                extraSmall = androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
-                small = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
-                medium = androidx.compose.foundation.shape.RoundedCornerShape(20.dp),
-                large = androidx.compose.foundation.shape.RoundedCornerShape(28.dp),
-                extraLarge = androidx.compose.foundation.shape.RoundedCornerShape(36.dp),
+            shapes = Shapes(
+                extraSmall = RoundedCornerShape(8.dp),
+                small = RoundedCornerShape(12.dp),
+                medium = RoundedCornerShape(16.dp),
+                large = RoundedCornerShape(20.dp),
+                extraLarge = RoundedCornerShape(24.dp),
             ),
             content = content,
         )

@@ -1,0 +1,1062 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<title>NEXCHAT Super Admin</title>
+<style>
+:root{
+  --bg:#0b1020; --bg-soft:#111830; --panel:#141c35; --panel-2:#1a2442;
+  --border:#263354; --text:#e8edf9; --muted:#93a1bf; --faint:#64739a;
+  --accent:#6d8cff; --accent-2:#8b5cf6; --success:#2dd4a7; --warning:#f3b34c; --danger:#ff6b81;
+  --shadow:0 18px 60px rgba(0,0,0,.35); --radius:14px; --sidebar:248px;
+}
+html[data-theme="light"]{
+  --bg:#f4f6fb; --bg-soft:#eef2f9; --panel:#ffffff; --panel-2:#f7f9fe;
+  --border:#dfe5f0; --text:#172033; --muted:#5b6880; --faint:#8490a8;
+  --accent:#3157e8; --accent-2:#7c3aed; --success:#078a70; --warning:#a86400; --danger:#c9314c;
+  --shadow:0 18px 60px rgba(24,38,74,.12);
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;background:var(--bg);color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;font-size:14px;line-height:1.45;
+}
+button,input,select,textarea{font:inherit;color:inherit}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.boot,.page-loading{padding:40px;color:var(--muted)}
+.boot{display:grid;place-items:center;min-height:100vh}
+.spinner{width:22px;height:22px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;display:inline-block;vertical-align:middle;margin-right:10px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.layout{display:flex;min-height:100vh}
+.sidebar{width:var(--sidebar);flex:0 0 var(--sidebar);background:var(--bg-soft);border-right:1px solid var(--border);padding:18px 14px;display:flex;flex-direction:column;gap:6px;position:sticky;top:0;height:100vh}
+.brand{display:flex;align-items:center;gap:10px;padding:6px 8px 18px;font-weight:800;letter-spacing:.4px}
+.brand .mark{width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,var(--accent),var(--accent-2));display:grid;place-items:center;color:#fff;font-size:15px;box-shadow:0 8px 24px rgba(109,140,255,.35)}
+.brand small{display:block;font-size:10px;color:var(--muted);font-weight:600;letter-spacing:1.4px;text-transform:uppercase}
+.nav-label{font-size:10px;letter-spacing:1.4px;text-transform:uppercase;color:var(--faint);padding:14px 10px 6px}
+.nav-item{display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:10px;color:var(--muted);font-weight:600;border:1px solid transparent}
+.nav-item:hover{background:var(--panel);color:var(--text);text-decoration:none}
+.nav-item.active{background:linear-gradient(135deg,rgba(109,140,255,.18),rgba(139,92,246,.14));border-color:rgba(109,140,255,.35);color:var(--text)}
+.nav-item .ico{width:18px;text-align:center;opacity:.9}
+.sidebar-foot{margin-top:auto;padding:12px 8px;color:var(--faint);font-size:11px;line-height:1.6}
+.main{flex:1;min-width:0;display:flex;flex-direction:column}
+.topbar{display:flex;align-items:center;gap:12px;padding:14px 26px;border-bottom:1px solid var(--border);background:color-mix(in srgb,var(--bg) 86%,transparent);position:sticky;top:0;z-index:20;backdrop-filter:blur(14px)}
+.topbar h1{font-size:19px;margin:0;line-height:1.2}
+.topbar .sub{color:var(--muted);font-size:12px;margin-top:2px}
+.grow{flex:1}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid var(--border);background:var(--panel);color:var(--text);padding:8px 12px;border-radius:9px;font-weight:650;cursor:pointer;white-space:nowrap}
+.btn:hover{border-color:var(--accent);text-decoration:none}
+.btn.primary{background:linear-gradient(135deg,var(--accent),var(--accent-2));border-color:transparent;color:#fff}
+.btn.danger{border-color:rgba(255,107,129,.4);color:var(--danger)}
+.btn.ghost{background:transparent}
+.btn.small{padding:5px 9px;font-size:12px;border-radius:7px}
+.btn:disabled{opacity:.55;cursor:not-allowed}
+.icon-btn{width:36px;height:36px;display:grid;place-items:center;border-radius:9px;border:1px solid var(--border);background:var(--panel);cursor:pointer}
+.content{padding:24px 26px 60px;max-width:1500px;width:100%;margin:0 auto}
+.panel{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:18px;box-shadow:var(--shadow)}
+.panel h2,.panel h3{margin:0 0 4px;font-size:15px}
+.panel .hint{color:var(--muted);font-size:12px;margin:0 0 14px}
+.grid{display:grid;gap:16px}
+.grid.cards{grid-template-columns:repeat(auto-fit,minmax(180px,1fr))}
+.grid.two{grid-template-columns:repeat(2,minmax(0,1fr))}
+.grid.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:16px;min-width:0}
+.card .label{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.9px;font-weight:700}
+.card .value{font-size:27px;font-weight:800;margin:8px 0 2px;letter-spacing:-.5px;overflow-wrap:anywhere}
+.card .sub{color:var(--muted);font-size:12px;overflow-wrap:anywhere}
+.card .delta{font-size:12px;font-weight:700;margin-left:6px}
+.up{color:var(--success)} .down{color:var(--danger)} .flat{color:var(--muted)}
+.status-strip{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:16px;padding:12px 14px;border-radius:12px;border:1px solid var(--border);background:var(--panel)}
+.dot{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:6px;background:var(--faint)}
+.dot.ok{background:var(--success);box-shadow:0 0 0 4px rgba(45,212,167,.12)}
+.dot.bad{background:var(--danger);box-shadow:0 0 0 4px rgba(255,107,129,.12)}
+.pill{display:inline-flex;align-items:center;gap:5px;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:700;border:1px solid var(--border);color:var(--muted);background:var(--panel-2);white-space:nowrap}
+.pill.ok{color:var(--success);border-color:rgba(45,212,167,.35);background:rgba(45,212,167,.08)}
+.pill.warn{color:var(--warning);border-color:rgba(243,179,76,.35);background:rgba(243,179,76,.08)}
+.pill.bad{color:var(--danger);border-color:rgba(255,107,129,.35);background:rgba(255,107,129,.08)}
+.pill.info{color:var(--accent);border-color:rgba(109,140,255,.35);background:rgba(109,140,255,.08)}
+.chart{width:100%;height:auto;display:block;overflow:visible}
+.chart text{fill:var(--faint);font-size:10px;font-family:inherit}
+.chart .grid-line{stroke:var(--border);stroke-width:1;opacity:.55}
+.chart .bar{fill:var(--accent);opacity:.88}
+.chart .bar.alt{fill:var(--success)}
+.chart .line{fill:none;stroke:var(--accent);stroke-width:2.4;stroke-linejoin:round;stroke-linecap:round}
+.chart .line.alt{stroke:var(--success)}
+.chart .area{fill:var(--accent);opacity:.10}
+.chart .dot{fill:var(--accent)}
+.legend{display:flex;gap:14px;flex-wrap:wrap;color:var(--muted);font-size:11px;margin-top:6px}
+.legend i{width:8px;height:8px;border-radius:2px;display:inline-block;margin-right:5px}
+.table-wrap{overflow:auto;border:1px solid var(--border);border-radius:12px}
+table{width:100%;border-collapse:collapse;min-width:640px}
+th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--border);vertical-align:middle;font-size:13px}
+th{color:var(--muted);font-size:10px;letter-spacing:.9px;text-transform:uppercase;background:var(--panel-2);position:sticky;top:0;z-index:1}
+tr:last-child td{border-bottom:none}
+tbody tr:hover{background:var(--panel-2)}
+td .name{font-weight:700}
+td .muted,.muted{color:var(--muted)}
+td .tiny,.tiny{font-size:11px;color:var(--faint)}
+.toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+.input,select,textarea{background:var(--bg-soft);border:1px solid var(--border);border-radius:9px;padding:9px 11px;min-width:0;color:var(--text)}
+textarea{width:100%;min-height:88px;resize:vertical}
+.input:focus,select:focus,textarea:focus{border-color:var(--accent);outline:none;box-shadow:0 0 0 3px rgba(109,140,255,.15)}
+label.field{display:block;margin-bottom:12px}
+label.field>span{display:block;font-size:12px;color:var(--muted);font-weight:650;margin-bottom:5px}
+.check{display:flex;align-items:flex-start;gap:9px;padding:10px;border:1px solid var(--border);border-radius:9px;background:var(--bg-soft);margin-bottom:10px}
+.check input{margin-top:3px}
+.check b{display:block;font-size:13px}
+.check small{display:block;color:var(--muted);font-size:11px;margin-top:2px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.row.end{justify-content:flex-end}
+.stack{display:grid;gap:10px}
+.mono{font-family:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace;font-size:12px;word-break:break-all}
+pre{background:var(--bg-soft);border:1px solid var(--border);border-radius:9px;padding:12px;overflow:auto;font-size:11px;line-height:1.5;max-height:320px;white-space:pre-wrap;word-break:break-word}
+.bar-list{display:grid;gap:9px}
+.bar-row{display:grid;grid-template-columns:minmax(90px,1.2fr) 2.6fr 48px;gap:10px;align-items:center;font-size:12px}
+.bar-track{height:8px;border-radius:999px;background:var(--bg-soft);overflow:hidden}
+.bar-fill{height:100%;border-radius:999px;background:linear-gradient(90deg,var(--accent),var(--accent-2))}
+.bar-fill.green{background:linear-gradient(90deg,var(--success),#7ee7c7)}
+.bar-fill.red{background:linear-gradient(90deg,var(--danger),#ff9eac)}
+.pager{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-top:12px;color:var(--muted);font-size:12px}
+.empty{padding:26px;text-align:center;color:var(--muted)}
+.error-box{border:1px solid rgba(255,107,129,.4);background:rgba(255,107,129,.08);color:var(--danger);padding:12px 14px;border-radius:10px;margin-bottom:14px;font-size:13px}
+.auth-wrap{min-height:100vh;display:grid;grid-template-columns:1.05fr .95fr}
+.auth-brand{background:radial-gradient(circle at 18% 18%,rgba(109,140,255,.28),transparent 45%),radial-gradient(circle at 80% 75%,rgba(139,92,246,.22),transparent 50%),var(--bg-soft);padding:48px;display:flex;flex-direction:column;justify-content:space-between;border-right:1px solid var(--border)}
+.auth-brand h1{font-size:40px;line-height:1.08;letter-spacing:-1.5px;margin:18px 0 12px;max-width:520px}
+.auth-brand p{color:var(--muted);max-width:480px;line-height:1.65}
+.auth-brand ul{list-style:none;padding:0;margin:26px 0 0;display:grid;gap:10px;color:var(--muted);font-size:13px}
+.auth-brand li:before{content:"✓";color:var(--success);font-weight:800;margin-right:8px}
+.auth-form{display:flex;align-items:center;justify-content:center;padding:36px}
+.auth-card{width:100%;max-width:420px}
+.auth-card h2{margin:0 0 6px;font-size:24px;letter-spacing:-.5px}
+.auth-card .hint{color:var(--muted);margin:0 0 22px;font-size:13px}
+.auth-card .input{width:100%}
+.auth-card .btn{width:100%;padding:11px;margin-top:4px}
+.secret-box{border:1px dashed var(--accent);background:rgba(109,140,255,.08);padding:14px;border-radius:10px;margin:12px 0}
+.modal-backdrop{position:fixed;inset:0;background:rgba(4,8,20,.68);backdrop-filter:blur(3px);z-index:100;display:grid;place-items:center;padding:18px}
+.modal{background:var(--panel);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);width:min(720px,100%);max-height:90vh;overflow:auto;padding:20px}
+.modal h3{margin:0 0 4px;font-size:18px}
+.modal .modal-head{display:flex;gap:12px;align-items:flex-start;margin-bottom:14px}
+.modal .close{margin-left:auto}
+.toast{position:fixed;right:18px;bottom:18px;z-index:200;display:grid;gap:8px}
+.toast div{background:var(--panel);border:1px solid var(--border);border-left:4px solid var(--accent);padding:11px 14px;border-radius:9px;box-shadow:var(--shadow);max-width:360px;font-size:13px}
+.toast div.bad{border-left-color:var(--danger)}
+.toast div.ok{border-left-color:var(--success)}
+.kv{display:grid;grid-template-columns:150px 1fr;gap:7px 12px;font-size:13px}
+.kv dt{color:var(--muted)}
+.kv dd{margin:0;overflow-wrap:anywhere}
+.notice{padding:11px 13px;border-radius:9px;border:1px solid var(--border);background:var(--panel-2);color:var(--muted);font-size:12px;margin-bottom:14px}
+.notice.warn{border-color:rgba(243,179,76,.4);background:rgba(243,179,76,.08);color:var(--warning)}
+.notice.bad{border-color:rgba(255,107,129,.4);background:rgba(255,107,129,.08);color:var(--danger)}
+.hamburger{display:none}
+.sidebar-backdrop{display:none}
+@media(max-width:1060px){.grid.two,.grid.three{grid-template-columns:1fr}.auth-wrap{grid-template-columns:1fr}.auth-brand{display:none}}
+@media(max-width:900px){
+  .sidebar{position:fixed;left:0;top:0;z-index:50;transform:translateX(-102%);transition:transform .2s ease;box-shadow:var(--shadow)}
+  body.nav-open .sidebar{transform:none}
+  body.nav-open .sidebar-backdrop{display:block;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:40}
+  .hamburger{display:grid}
+  .topbar{padding:12px 16px}
+  .content{padding:16px 14px 60px}
+  .topbar h1{font-size:17px}
+}
+@media(max-width:620px){
+  .grid.cards{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .card .value{font-size:22px}
+  .auth-form{padding:22px}
+  .kv{grid-template-columns:1fr}
+  .bar-row{grid-template-columns:90px 1fr 40px}
+}
+@media print{
+  body{background:#fff;color:#000}
+  .sidebar,.topbar,.sidebar-backdrop,.toast,.no-print{display:none!important}
+  .content{padding:0;max-width:none}
+  .panel,.card{border-color:#ccc;box-shadow:none;background:#fff}
+  .table-wrap{overflow:visible;border-color:#999}
+  th{background:#eee;color:#000}
+  a{color:#000}
+}
+</style>
+</head>
+<body>
+<div id="app"><div class="boot"><span class="spinner"></span>Loading NEXCHAT Admin…</div></div>
+<div id="modal-root"></div>
+<div id="toast" class="toast" aria-live="polite"></div>
+<div class="sidebar-backdrop" id="sidebar-backdrop"></div>
+<script nonce="__CSP_NONCE__">
+'use strict';
+const state = {
+  admin: null, csrf: null, route: 'overview', range: '30d',
+  userQuery: '', userStatus: 'active', userSort: 'created_desc', userPage: 1,
+  callsStatus: '', callsPage: 1, auditPage: 1, auditAction: '',
+  monitoring: null, editingAnnouncement: null, boot: null, callCache: {}
+};
+const PERMS = {
+  super_admin: ['*'],
+  admin: ['dashboard.read','users.read','users.write','calls.read','monitoring.read','config.read','config.write','announcements.write','audit.read','reports.export'],
+  analyst: ['dashboard.read','users.read','calls.read','monitoring.read','config.read','reports.export'],
+  support: ['dashboard.read','users.read','users.write','calls.read','monitoring.read']
+};
+function can(permission){
+  const list = PERMS[state.admin && state.admin.role] || [];
+  return list.includes('*') || list.includes(permission);
+}
+const $ = (selector, root) => (root || document).querySelector(selector);
+const $$ = (selector, root) => Array.from((root || document).querySelectorAll(selector));
+function h(value){
+  return String(value === null || value === undefined ? '' : value)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+function fmtNum(value){
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '—';
+  if (Math.abs(n) >= 1000000) return (n/1000000).toFixed(n % 1000000 === 0 ? 0 : 1) + 'M';
+  if (Math.abs(n) >= 10000) return (n/1000).toFixed(1) + 'K';
+  return n.toLocaleString();
+}
+function fmtBytes(value){
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return '—';
+  const units = ['B','KB','MB','GB','TB'];
+  let size = n, i = 0;
+  while (size >= 1024 && i < units.length - 1) { size /= 1024; i++; }
+  return size.toFixed(size >= 100 || i === 0 ? 0 : 1) + ' ' + units[i];
+}
+function fmtAt(value){
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '—';
+  return date.toLocaleString(undefined, { dateStyle:'medium', timeStyle:'short' });
+}
+function fmtDay(value){
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return h(value);
+  return date.toLocaleDateString(undefined, { month:'short', day:'numeric' });
+}
+function fmtDuration(seconds){
+  const n = Number(seconds);
+  if (!Number.isFinite(n) || n < 0) return '—';
+  if (n < 60) return Math.round(n) + 's';
+  const m = Math.floor(n/60), s = Math.round(n%60);
+  if (m < 60) return m + 'm ' + s + 's';
+  const hours = Math.floor(m/60), minutes = m%60;
+  return hours + 'h ' + minutes + 'm';
+}
+function pct(value){
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return '—';
+  return Number(value).toFixed(1) + '%';
+}
+function delta(current, previous){
+  const c = Number(current) || 0, p = Number(previous) || 0;
+  if (p === 0) return c > 0 ? '<span class="delta up">new</span>' : '';
+  const change = Math.round(((c - p) / p) * 1000) / 10;
+  const cls = change > 0 ? 'up' : change < 0 ? 'down' : 'flat';
+  return '<span class="delta ' + cls + '">' + (change > 0 ? '+' : '') + change + '%</span>';
+}
+function statusPill(status){
+  const map = { active:'ok', connected:'ok', ended:'ok', suspended:'warn', ringing:'info', declined:'warn', missed:'warn', failed:'bad', deleted:'bad' };
+  return '<span class="pill ' + (map[status] || '') + '">' + h(status) + '</span>';
+}
+function toast(message, kind){
+  const box = document.createElement('div');
+  box.className = kind || '';
+  box.textContent = message;
+  $('#toast').appendChild(box);
+  setTimeout(() => box.remove(), 4200);
+}
+function setTheme(theme){
+  document.documentElement.dataset.theme = theme;
+  try { localStorage.setItem('nexchat_admin_theme', theme); } catch (_) {}
+}
+function initTheme(){
+  let theme = 'dark';
+  try { theme = localStorage.getItem('nexchat_admin_theme') || 'dark'; } catch (_) {}
+  setTheme(theme === 'light' ? 'light' : 'dark');
+}
+async function api(path, options){
+  options = options || {};
+  const method = (options.method || 'GET').toUpperCase();
+  const headers = Object.assign({ accept:'application/json' }, options.headers || {});
+  if (options.body !== undefined) headers['content-type'] = 'application/json';
+  if (state.csrf && method !== 'GET' && method !== 'HEAD') headers['x-admin-csrf'] = state.csrf;
+  const response = await fetch(path, {
+    method, headers, credentials:'same-origin',
+    body: options.body !== undefined ? JSON.stringify(options.body) : undefined
+  });
+  const text = await response.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch (_) { data = { raw:text }; }
+  if (response.status === 401 && !options.allow401) {
+    state.admin = null; state.csrf = null;
+    showLogin('Your session expired. Sign in again.');
+    throw new Error('Session expired');
+  }
+  if (!response.ok) {
+    const message = data && data.error && data.error.message ? data.error.message : 'Request failed (' + response.status + ')';
+    throw new Error(message);
+  }
+  return data;
+}
+function shell(title, subtitle, body){
+  const nav = [
+    ['overview','Overview','◫','dashboard.read'],
+    ['users','Users','◎','users.read'],
+    ['calls','Calls','☎','calls.read'],
+    ['monitoring','Monitoring','◈','monitoring.read'],
+    ['config','Remote config','⚙','config.read'],
+    ['announcements','Announcements','✎','config.read'],
+    ['audit','Audit log','▤','audit.read'],
+    ['admins','Administrators','♜','admins.manage'],
+    ['account','My account','☺','']
+  ].filter(item => !item[3] || can(item[3]));
+  const items = nav.map(item => '<a class="nav-item ' + (state.route === item[0] ? 'active' : '') + '" href="#/' + item[0] + '" data-nav="' + item[0] + '"><span class="ico">' + item[2] + '</span>' + item[1] + '</a>').join('');
+  const rangeSelect = '<select id="range-select" aria-label="Date range">' + [['7d','Last 7 days'],['30d','Last 30 days'],['90d','Last 90 days'],['365d','Last year']].map(option => '<option value="' + option[0] + '"' + (state.range === option[0] ? ' selected' : '') + '>' + option[1] + '</option>').join('') + '</select>';
+  $('#app').innerHTML =
+    '<div class="layout">' +
+      '<aside class="sidebar">' +
+        '<div class="brand"><div class="mark">N</div><div>NEXCHAT<small>Super Admin</small></div></div>' +
+        '<div class="nav-label">Operations</div>' + items +
+        '<div class="sidebar-foot">Encrypted messaging relay<br>Vercel + Neon PostgreSQL<br><span id="sidebar-admin">' + h(state.admin ? state.admin.username : '') + '</span></div>' +
+      '</aside>' +
+      '<div class="main">' +
+        '<header class="topbar">' +
+          '<button class="icon-btn hamburger" id="nav-toggle" aria-label="Open navigation">☰</button>' +
+          '<div><h1>' + h(title) + '</h1><div class="sub">' + h(subtitle) + '</div></div>' +
+          '<div class="grow"></div>' + rangeSelect +
+          '<button class="icon-btn" id="refresh-btn" title="Refresh" aria-label="Refresh">⟳</button>' +
+          '<button class="icon-btn" id="theme-btn" title="Toggle dark mode" aria-label="Toggle dark mode">◐</button>' +
+          '<button class="btn ghost small" id="logout-btn">Sign out</button>' +
+        '</header>' +
+        '<main class="content" id="main">' + body + '</main>' +
+      '</div>' +
+    '</div>';
+  const toggle = $('#nav-toggle');
+  if (toggle) toggle.addEventListener('click', () => document.body.classList.toggle('nav-open'));
+  const backdrop = $('#sidebar-backdrop');
+  if (backdrop) backdrop.addEventListener('click', () => document.body.classList.remove('nav-open'));
+  $('#refresh-btn').addEventListener('click', () => renderRoute());
+  $('#theme-btn').addEventListener('click', () => setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
+  $('#logout-btn').addEventListener('click', doLogout);
+  $('#range-select').addEventListener('change', event => { state.range = event.target.value; renderRoute(); });
+}
+function authShell(title, subtitle, body){
+  $('#app').innerHTML =
+    '<div class="auth-wrap">' +
+      '<section class="auth-brand">' +
+        '<div><div class="brand"><div class="mark">N</div><div>NEXCHAT<small>Super Admin</small></div></div>' +
+        '<h1>Operate NEXCHAT with facts, not guesses.</h1>' +
+        '<p>Live user, message, call and crash telemetry from your existing Vercel and Neon deployment. No sample numbers and no separate analytics service.</p>' +
+        '<ul><li>Two-factor authenticated administration</li><li>Role-based access with a full audit trail</li><li>Remote feature flags and announcements</li><li>CSV reports and printable summaries</li></ul></div>' +
+        '<div class="tiny">Encrypted communications stay private. This panel never exposes message content, keys or call media.</div>' +
+      '</section>' +
+      '<section class="auth-form"><div class="auth-card"><h2>' + h(title) + '</h2><p class="hint">' + h(subtitle) + '</p>' + body + '</div></section>' +
+    '</div>';
+}
+function showFatal(message){
+  $('#app').innerHTML = '<div class="boot"><div style="max-width:520px;text-align:center"><div class="error-box">' + h(message) + '</div><button class="btn primary" id="fatal-retry">Retry</button></div></div>';
+  $('#fatal-retry').addEventListener('click', () => location.reload());
+}
+function enrollmentHtml(data){
+  var qr = data.qrDataUrl
+    ? '<img src="' + h(data.qrDataUrl) + '" alt="Scan this QR code with your authenticator app" style="width:200px;height:200px;flex:0 0 200px;background:#fff;border-radius:12px;padding:8px">'
+    : '';
+  return '<div style="display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap;margin-bottom:14px">' + qr +
+    '<div style="flex:1;min-width:220px">' +
+      '<div class="tiny">Manual entry secret</div>' +
+      '<div class="mono" style="font-size:15px;margin:8px 0;word-break:break-all">' + h(data.totpSecret) + '</div>' +
+      '<div class="tiny">otpauth URI</div>' +
+      '<div class="mono" style="margin-top:5px;word-break:break-all">' + h(data.otpauthUri) + '</div>' +
+    '</div></div>' +
+    '<div class="notice warn">Scan the QR code with Google Authenticator, or copy the manual secret, before continuing. It will not be shown again.</div>';
+}
+async function boot(){
+  initTheme();
+  try {
+    const response = await fetch('/v1/admin/bootstrap', { credentials:'same-origin' });
+    const data = await response.json();
+    state.boot = data;
+    if (location.pathname.replace(/\/+$/, '') === '/admin/signup') return showSignup(data);
+    if (data.setupRequired) return showSetup(data);
+    const me = await fetch('/v1/admin/auth/me', { credentials:'same-origin' });
+    if (me.status === 200) {
+      const session = await me.json();
+      state.admin = session.admin; state.csrf = session.csrfToken;
+      return showApp();
+    }
+    showLogin();
+  } catch (error) {
+    showFatal('Could not reach the NEXCHAT relay: ' + error.message);
+  }
+}
+function showLogin(message){
+  state.admin = null; state.csrf = null;
+  authShell('Administrator sign-in', 'Password and authenticator code are both required.', 
+    (message ? '<div class="error-box">' + h(message) + '</div>' : '') +
+    '<form id="login-form">' +
+      '<label class="field"><span>Username</span><input class="input" id="login-username" autocomplete="username" required maxlength="32"></label>' +
+      '<label class="field"><span>Password</span><input class="input" id="login-password" type="password" autocomplete="current-password" required maxlength="128"></label>' +
+      '<label class="field"><span>Six-digit authenticator code</span><input class="input" id="login-code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required placeholder="000000"></label>' +
+      '<div class="error-box" id="login-error" style="display:none"></div>' +
+      '<button class="btn primary" id="login-submit" type="submit">Sign in securely</button>' +
+    '</form>' +
+    '<p class="tiny" style="margin-top:16px">Sessions expire after 12 hours and are bound to an HttpOnly, SameSite cookie.</p>' +
+    (state.boot && state.boot.signupEnabled
+      ? '<p class="tiny" style="margin-top:12px"><a href="#" id="login-signup" style="color:inherit">Lost access? Create an admin with the setup token</a></p>'
+      : '')
+  );
+  var signupLink = $('#login-signup');
+  if (signupLink) signupLink.addEventListener('click', event => {
+    event.preventDefault(); location.href = '/admin/signup';
+  });
+  $('#login-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const button = $('#login-submit'), errorBox = $('#login-error');
+    errorBox.style.display = 'none'; button.disabled = true; button.textContent = 'Verifying…';
+    try {
+      const data = await api('/v1/admin/auth/login', {
+        method:'POST', allow401:true,
+        body: {
+          username: $('#login-username').value.trim(),
+          password: $('#login-password').value,
+          code: $('#login-code').value.trim()
+        }
+      });
+      state.admin = data.admin; state.csrf = data.csrfToken;
+      location.hash = '#/overview';
+      showApp();
+    } catch (error) {
+      errorBox.textContent = error.message; errorBox.style.display = 'block';
+      button.disabled = false; button.textContent = 'Sign in securely';
+    }
+  });
+}
+function showSetup(bootstrap){
+  if (!bootstrap.setupEnabled) {
+    authShell('Setup is locked', 'The relay is refusing first-run setup until a bootstrap secret is configured.',
+      '<div class="notice warn"><b>ADMIN_SETUP_TOKEN is not configured.</b><br>Add a long random value as an <span class="mono">ADMIN_SETUP_TOKEN</span> environment variable in the Vercel project, redeploy, then reload this page.</div>' +
+      '<p class="tiny">If an administrator already exists, setup stays closed permanently. Use the existing account or reset 2FA through another super admin.</p>'
+    );
+    return;
+  }
+  authShell('Create the first super admin', 'This page works once. The authenticator secret is shown only after creation.', 
+    '<form id="setup-form">' +
+      '<label class="field"><span>One-time setup token</span><input class="input" id="setup-token" type="password" autocomplete="off" required></label>' +
+      '<label class="field"><span>Username</span><input class="input" id="setup-username" autocomplete="username" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_.-]{3,32}"></label>' +
+      '<label class="field"><span>Display name</span><input class="input" id="setup-display" required maxlength="60"></label>' +
+      '<label class="field"><span>Password (12+ characters)</span><input class="input" id="setup-password" type="password" autocomplete="new-password" required minlength="12" maxlength="128"></label>' +
+      '<div class="error-box" id="setup-error" style="display:none"></div>' +
+      '<button class="btn primary" id="setup-submit" type="submit">Create administrator</button>' +
+    '</form>'
+  );
+  $('#setup-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const button = $('#setup-submit'), errorBox = $('#setup-error');
+    errorBox.style.display = 'none'; button.disabled = true; button.textContent = 'Creating…';
+    try {
+      const data = await api('/v1/admin/setup', {
+        method:'POST',
+        headers:{ 'x-setup-token': $('#setup-token').value.trim() },
+        body: {
+          username: $('#setup-username').value.trim(),
+          displayName: $('#setup-display').value.trim(),
+          password: $('#setup-password').value
+        }
+      });
+      authShell('Authenticator enrolled', 'Scan the QR code with Google Authenticator now.',
+        enrollmentHtml(data) +
+        '<button class="btn primary" id="setup-continue" style="margin-top:14px">I saved the secret — sign in</button>'
+      );
+      $('#setup-continue').addEventListener('click', () => showLogin());
+    } catch (error) {
+      errorBox.textContent = error.message; errorBox.style.display = 'block';
+      button.disabled = false; button.textContent = 'Create administrator';
+    }
+  });
+}
+function showSignup(bootstrap){
+  if (!bootstrap.signupEnabled) {
+    authShell('Signup is locked', 'No ADMIN_SETUP_TOKEN is configured on this deployment.',
+      '<div class="notice warn"><b>ADMIN_SETUP_TOKEN is not configured.</b><br>Add it in Vercel → Settings → Environment Variables, redeploy, then reload this page.</div>' +
+      '<p class="tiny"><a href="/admin" style="color:inherit">Back to sign in</a></p>'
+    );
+    return;
+  }
+  authShell('Create an administrator', 'Choose your own username and password. The setup token comes from your Vercel environment.',
+    '<form id="signup-form">' +
+      '<label class="field"><span>One-time setup token</span><input class="input" id="signup-token" type="password" autocomplete="off" required></label>' +
+      '<label class="field"><span>Username</span><input class="input" id="signup-username" autocomplete="username" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_.-]{3,32}"></label>' +
+      '<label class="field"><span>Display name</span><input class="input" id="signup-display" required maxlength="60"></label>' +
+      '<label class="field"><span>Password (12+ characters)</span><input class="input" id="signup-password" type="password" autocomplete="new-password" required minlength="12" maxlength="128"></label>' +
+      '<div class="error-box" id="signup-error" style="display:none"></div>' +
+      '<button class="btn primary" id="signup-submit" type="submit">Create administrator</button>' +
+      '<p class="tiny" style="margin-top:12px"><a href="/admin" style="color:inherit">Back to sign in</a></p>' +
+    '</form>'
+  );
+  $('#signup-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    var button = $('#signup-submit'), errorBox = $('#signup-error');
+    errorBox.style.display = 'none'; button.disabled = true; button.textContent = 'Creating…';
+    try {
+      var data = await api('/v1/admin/signup', {
+        method: 'POST',
+        headers: { 'x-setup-token': $('#signup-token').value.trim() },
+        body: {
+          username: $('#signup-username').value.trim(),
+          displayName: $('#signup-display').value.trim(),
+          password: $('#signup-password').value
+        }
+      });
+      authShell('Authenticator enrolled', 'Scan the QR code with Google Authenticator now.',
+        enrollmentHtml(data) +
+        '<button class="btn primary" id="signup-continue" style="margin-top:14px">I saved the secret — sign in</button>'
+      );
+      $('#signup-continue').addEventListener('click', () => {
+        history.replaceState(null, '', '/admin');
+        showLogin();
+      });
+    } catch (error) {
+      errorBox.textContent = error.message; errorBox.style.display = 'block';
+      button.disabled = false; button.textContent = 'Create administrator';
+    }
+  });
+}
+let hashBound = false;
+function showApp(){
+  if (!state.admin) return showLogin();
+  if (!location.hash) location.hash = '#/overview';
+  if (!hashBound) {
+    hashBound = true;
+    window.addEventListener('hashchange', () => { if (state.admin) renderRoute(); });
+  }
+  renderRoute();
+}
+async function doLogout(){
+  try { await api('/v1/admin/auth/logout', { method:'POST' }); } catch (_) {}
+  state.admin = null; state.csrf = null;
+  showLogin('Signed out.');
+}
+const TITLES = {
+  overview:['Overview','Live operational picture'],
+  users:['Users','Accounts, devices and sessions'],
+  calls:['Calls','WebRTC call sessions and outcomes'],
+  monitoring:['Monitoring','Crashes, failed calls and service health'],
+  config:['Remote configuration','Feature flags that synchronise with Android'],
+  announcements:['Announcements','In-app notices controlled from here'],
+  audit:['Audit log','Every sensitive administrative action'],
+  admins:['Administrators','Roles, access and 2FA'],
+  account:['My account','Password and active sessions']
+};
+async function renderRoute(){
+  if (!state.admin) return;
+  const route = (location.hash.replace('#/','').split('?')[0] || 'overview');
+  if (!TITLES[route]) { location.hash = '#/overview'; return; }
+  state.route = route;
+  const meta = TITLES[route];
+  shell(meta[0], meta[1], '<div class="page-loading"><span class="spinner"></span>Loading…</div>');
+  document.body.classList.remove('nav-open');
+  try {
+    if (route === 'overview') await overviewView();
+    else if (route === 'users') await usersView();
+    else if (route === 'calls') await callsView();
+    else if (route === 'monitoring') await monitoringView();
+    else if (route === 'config') await configView();
+    else if (route === 'announcements') await announcementsView();
+    else if (route === 'audit') await auditView();
+    else if (route === 'admins') await adminsView();
+    else if (route === 'account') await accountView();
+  } catch (error) {
+    const main = $('#main');
+    if (main) main.innerHTML = '<div class="error-box">' + h(error.message) + '</div>';
+  }
+}
+function card(label, value, sub, extra){
+  return '<div class="card"><div class="label">' + h(label) + '</div><div class="value">' + value + '</div><div class="sub">' + (sub || '') + (extra || '') + '</div></div>';
+}
+function barChart(series, className){
+  const width = 640, height = 190, padX = 28, padTop = 12, padBottom = 26;
+  const max = Math.max(1, ...series.map(point => Number(point.value) || 0));
+  const innerW = width - padX*2, innerH = height - padTop - padBottom;
+  const step = innerW / Math.max(1, series.length);
+  const barW = Math.max(2, step * 0.64);
+  const labelEvery = Math.max(1, Math.ceil(series.length / 7));
+  let bars = '', labels = '', grid = '';
+  for (let g = 0; g <= 4; g++) {
+    const y = padTop + (innerH / 4) * g;
+    grid += '<line class="grid-line" x1="' + padX + '" y1="' + y.toFixed(1) + '" x2="' + (width-padX) + '" y2="' + y.toFixed(1) + '"/>';
+  }
+  series.forEach((point, index) => {
+    const value = Number(point.value) || 0;
+    const barH = (value / max) * innerH;
+    const x = padX + index*step + (step-barW)/2;
+    const y = padTop + innerH - barH;
+    bars += '<rect class="bar ' + (className || '') + '" x="' + x.toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + barW.toFixed(1) + '" height="' + Math.max(1,barH).toFixed(1) + '" rx="3"><title>' + h(point.date) + ': ' + fmtNum(value) + '</title></rect>';
+    if (index % labelEvery === 0) labels += '<text x="' + (padX + index*step + step/2).toFixed(1) + '" y="' + (height-6) + '" text-anchor="middle">' + h(fmtDay(point.date)) + '</text>';
+  });
+  return '<svg class="chart" viewBox="0 0 ' + width + ' ' + height + '" role="img" aria-label="Bar chart">' + grid + bars + labels + '</svg>';
+}
+function lineChart(series, altSeries, className){
+  const width = 640, height = 190, padX = 28, padTop = 12, padBottom = 26;
+  const all = series.concat(altSeries || []);
+  const max = Math.max(1, ...all.map(point => Number(point.value) || 0));
+  const innerW = width - padX*2, innerH = height - padTop - padBottom;
+  const xAt = index => padX + index * (innerW / Math.max(1, series.length - 1));
+  const yAt = value => padTop + innerH - ((Number(value) || 0) / max) * innerH;
+  let grid = '';
+  for (let g = 0; g <= 4; g++) {
+    const y = padTop + (innerH / 4) * g;
+    grid += '<line class="grid-line" x1="' + padX + '" y1="' + y.toFixed(1) + '" x2="' + (width-padX) + '" y2="' + y.toFixed(1) + '"/>';
+  }
+  function pathFor(points){
+    return points.map((point, index) => (index ? 'L' : 'M') + xAt(index).toFixed(1) + ',' + yAt(point.value).toFixed(1)).join(' ');
+  }
+  const mainPath = pathFor(series);
+  const area = mainPath + ' L ' + xAt(series.length-1).toFixed(1) + ',' + (padTop+innerH) + ' L ' + padX + ',' + (padTop+innerH) + ' Z';
+  const altPath = altSeries && altSeries.length ? pathFor(altSeries) : '';
+  const labelEvery = Math.max(1, Math.ceil(series.length / 7));
+  let labels = '';
+  series.forEach((point, index) => {
+    if (index % labelEvery === 0) labels += '<text x="' + xAt(index).toFixed(1) + '" y="' + (height-6) + '" text-anchor="middle">' + h(fmtDay(point.date)) + '</text>';
+  });
+  const dots = series.map((point, index) => '<circle class="dot" cx="' + xAt(index).toFixed(1) + '" cy="' + yAt(point.value).toFixed(1) + '" r="2"><title>' + h(point.date) + ': ' + fmtNum(point.value) + '</title></circle>').join('');
+  return '<svg class="chart" viewBox="0 0 ' + width + ' ' + height + '" role="img" aria-label="Line chart">' + grid +
+    '<path class="area" d="' + area + '"/><path class="line ' + (className || '') + '" d="' + mainPath + '"/>' +
+    (altPath ? '<path class="line alt" d="' + altPath + '"/>' : '') + dots + labels + '</svg>';
+}
+function barList(rows, valueKey, labelKey, color){
+  const max = Math.max(1, ...rows.map(row => Number(row[valueKey]) || 0));
+  if (!rows.length) return '<div class="empty">No data yet</div>';
+  return '<div class="bar-list">' + rows.map(row => {
+    const value = Number(row[valueKey]) || 0;
+    return '<div class="bar-row"><span class="muted">' + h(row[labelKey] || 'unknown') + '</span><span class="bar-track"><span class="bar-fill ' + (color || '') + '" style="width:' + ((value/max)*100).toFixed(1) + '%"></span></span><b>' + fmtNum(value) + '</b></div>';
+  }).join('') + '</div>';
+}
+async function overviewView(){
+  const data = await api('/v1/admin/dashboard?range=' + encodeURIComponent(state.range));
+  const m = data.metrics, s = data.series;
+  const health = data.health;
+  const healthOk = health.dbOk;
+  const main = $('#main');
+  main.innerHTML =
+    '<div class="status-strip">' +
+      '<span><span class="dot ' + (healthOk ? 'ok' : 'bad') + '"></span>' + (healthOk ? 'Relay and database reachable' : 'Database check failed') + '</span>' +
+      '<span class="pill">DB ' + fmtNum(health.dbLatencyMs) + ' ms</span>' +
+      '<span class="pill">Admin API ' + fmtNum(data.adminLatencyMs) + ' ms</span>' +
+      '<span class="pill">' + fmtNum(health.memoryMb) + ' MB RSS</span>' +
+      '<span class="pill">' + h(health.region || 'region unknown') + '</span>' +
+      '<span class="grow"></span><span class="tiny">Generated ' + h(fmtAt(data.generatedAt)) + '</span>' +
+    '</div>' +
+    '<div class="grid cards">' +
+      card('Total users', fmtNum(m.totalUsers), '+' + fmtNum(m.newUsers) + ' new', delta(m.newUsers, m.previousNewUsers)) +
+      card('Online now', fmtNum(m.onlineUsers), 'active in last 2 minutes') +
+      card('Active 30 days', fmtNum(m.activeUsers30d), 'devices seen in 30 days') +
+      card('Calls', fmtNum(m.totalCalls), m.callSuccessRate === null ? 'no calls in range' : pct(m.callSuccessRate) + ' connected', delta(m.totalCalls, m.previousTotalCalls)) +
+      card('Messages sent', fmtNum(m.messagesSent), m.deliveryRate === null ? 'no messages in range' : pct(m.deliveryRate) + ' delivered', delta(m.messagesSent, m.previousMessagesSent)) +
+      card('Crashes', fmtNum(m.crashes), 'in selected range', delta(m.crashes, m.previousCrashes)) +
+      card('Avg call duration', fmtDuration(m.averageCallSeconds), 'connected calls') +
+      card('Database size', fmtBytes(health.databaseSizeBytes), 'Neon PostgreSQL') +
+    '</div>' +
+    '<div class="grid two" style="margin-top:16px">' +
+      '<section class="panel"><h2>User growth</h2><p class="hint">New registrations per day</p>' + barChart(s.users) + '</section>' +
+      '<section class="panel"><h2>Daily active users</h2><p class="hint">Distinct accounts sending an Android heartbeat</p>' + lineChart(s.activity) + '</section>' +
+      '<section class="panel"><h2>Message volume</h2><p class="hint">Envelopes accepted per day (server-side count)</p>' + barChart(s.messages) + '</section>' +
+      '<section class="panel"><h2>Calls started</h2><p class="hint">All call attempts, with connected calls in green</p>' + lineChart(s.calls, s.connectedCalls) + '<div class="legend"><span><i style="background:var(--accent)"></i>Started</span><span><i style="background:var(--success)"></i>Connected</span></div></section>' +
+      '<section class="panel"><h2>Crash trend</h2><p class="hint">Android crash reports received</p>' + barChart(s.crashes) + '</section>' +
+      '<section class="panel"><h2>Call outcomes</h2><p class="hint">Selected range</p>' + barList(data.callStatus, 'count', 'status', 'green') + '</section>' +
+      '<section class="panel"><h2>Feature usage</h2><p class="hint">Android analytics events</p>' + barList(data.topEvents, 'count', 'type') + '</section>' +
+      '<section class="panel"><h2>Platforms and versions</h2><p class="hint">Registered devices</p>' + barList(data.platforms, 'count', 'platform') + '<div style="height:12px"></div>' + barList(data.versions, 'count', 'version') + '</section>' +
+    '</div>' +
+    '<section class="panel" style="margin-top:16px"><h2>Recent calls</h2><p class="hint">Latest call sessions across the service</p>' +
+      (data.recentCalls.length ? callsTable(data.recentCalls) : '<div class="empty">No call telemetry yet. Calls recorded by NEXCHAT 1.0.5 and later appear here.</div>') +
+    '</section>';
+  bindCallRows();
+}
+function callsTable(calls){
+  calls.forEach(call => { state.callCache[call.callId] = call; });
+  return '<div class="table-wrap"><table><thead><tr><th>Started</th><th>Caller</th><th>Callee</th><th>Status</th><th>Duration</th><th>Connect</th><th>Version</th></tr></thead><tbody>' +
+    calls.map(call =>
+      '<tr data-call="' + h(call.callId) + '"><td>' + h(fmtAt(call.startedAt)) + '</td>' +
+      '<td><div class="name">' + h(call.caller.displayName || call.caller.username || '—') + '</div><div class="tiny">' + h(call.caller.nexId || '') + '</div></td>' +
+      '<td><div class="name">' + h(call.callee.displayName || call.callee.username || '—') + '</div><div class="tiny">' + h(call.callee.nexId || '') + '</div></td>' +
+      '<td>' + statusPill(call.status) + (call.failureReason ? '<div class="tiny">' + h(call.failureReason) + '</div>' : '') + '</td>' +
+      '<td>' + fmtDuration(call.durationSeconds) + '</td><td>' + (call.connectSeconds === null ? '—' : fmtDuration(call.connectSeconds)) + '</td>' +
+      '<td class="tiny">' + h(call.appVersion || '—') + '</td></tr>'
+    ).join('') + '</tbody></table></div>';
+}
+function bindCallRows(){
+  $$('[data-call]').forEach(row => row.addEventListener('click', () => {
+    const found = state.callCache[row.dataset.call];
+    if (found) callModal(found);
+  }));
+}
+function callModal(call){
+  openModal('<div class="modal-head"><div><h3>Call ' + h(call.status) + '</h3><div class="tiny mono">' + h(call.callId) + '</div></div><button class="icon-btn close" data-close>×</button></div>' +
+    '<dl class="kv">' +
+      '<dt>Caller</dt><dd>' + h(call.caller.displayName || '—') + ' <span class="muted">' + h(call.caller.nexId || '') + '</span></dd>' +
+      '<dt>Callee</dt><dd>' + h(call.callee.displayName || '—') + ' <span class="muted">' + h(call.callee.nexId || '') + '</span></dd>' +
+      '<dt>Mode</dt><dd>' + h(call.mode) + '</dd><dt>Status</dt><dd>' + statusPill(call.status) + '</dd>' +
+      '<dt>Started</dt><dd>' + h(fmtAt(call.startedAt)) + '</dd><dt>Connected</dt><dd>' + h(fmtAt(call.connectedAt)) + '</dd>' +
+      '<dt>Ended</dt><dd>' + h(fmtAt(call.endedAt)) + '</dd><dt>Duration</dt><dd>' + fmtDuration(call.durationSeconds) + '</dd>' +
+      '<dt>Connection time</dt><dd>' + (call.connectSeconds === null ? '—' : fmtDuration(call.connectSeconds)) + '</dd>' +
+      '<dt>Failure reason</dt><dd>' + h(call.failureReason || '—') + '</dd><dt>App version</dt><dd>' + h(call.appVersion || '—') + '</dd>' +
+    '</dl>');
+}
+async function usersView(){
+  const main = $('#main');
+  main.innerHTML =
+    '<div class="toolbar">' +
+      '<input class="input" id="user-search" placeholder="Search username, display name or NEX ID" style="min-width:290px;flex:1" value="' + h(state.userQuery) + '">' +
+      '<select id="user-status"><option value="active">Active</option><option value="suspended">Suspended</option><option value="deleted">Deleted</option><option value="all">All accounts</option></select>' +
+      '<select id="user-sort"><option value="created_desc">Newest first</option><option value="last_seen_desc">Recently active</option><option value="username_asc">Username A–Z</option><option value="created_asc">Oldest first</option></select>' +
+      (can('reports.export') ? '<a class="btn ghost" href="/v1/admin/reports/users/export.csv?range=' + encodeURIComponent(state.range) + '">Export CSV</a>' : '') +
+    '</div>' +
+    '<section class="panel"><div id="users-table"><div class="page-loading"><span class="spinner"></span>Loading users…</div></div></section>';
+  $('#user-status').value = state.userStatus;
+  $('#user-sort').value = state.userSort;
+  $('#user-status').addEventListener('change', event => { state.userStatus = event.target.value; state.userPage = 1; loadUsers(1); });
+  $('#user-sort').addEventListener('change', event => { state.userSort = event.target.value; state.userPage = 1; loadUsers(1); });
+  $('#user-search').addEventListener('keydown', event => { if (event.key === 'Enter') { state.userQuery = event.target.value.trim(); state.userPage = 1; loadUsers(1); } });
+  await loadUsers(state.userPage);
+}
+async function loadUsers(page){
+  state.userPage = page;
+  const target = $('#users-table');
+  if (!target) return;
+  target.innerHTML = '<div class="page-loading"><span class="spinner"></span>Loading users…</div>';
+  try {
+    const params = new URLSearchParams({ page:String(page), pageSize:'25', status:state.userStatus, sort:state.userSort });
+    if (state.userQuery) params.set('q', state.userQuery);
+    const data = await api('/v1/admin/users?' + params.toString());
+    if (!data.users.length) {
+      target.innerHTML = '<div class="empty">No accounts match this filter.</div>';
+      return;
+    }
+    target.innerHTML = '<div class="table-wrap"><table><thead><tr><th>Account</th><th>NEX ID</th><th>Status</th><th>Devices</th><th>Last active</th><th>Registered</th><th></th></tr></thead><tbody>' +
+      data.users.map(user =>
+        '<tr data-user="' + h(user.id) + '"><td><div class="name">' + h(user.displayName || user.username) + '</div><div class="tiny">@' + h(user.username) + '</div></td>' +
+        '<td class="mono">' + h(user.nexId) + '</td><td>' + statusPill(user.status) + '</td>' +
+        '<td>' + fmtNum(user.deviceCount) + '</td><td>' + h(fmtAt(user.lastSeenAt)) + '</td><td>' + h(fmtAt(user.createdAt)) + '</td>' +
+        '<td><button class="btn small ghost" data-user-open="' + h(user.id) + '">Open</button></td></tr>'
+      ).join('') + '</tbody></table></div>' +
+      '<div class="pager"><span>Page ' + data.page + ' of ' + data.pages + ' · ' + fmtNum(data.total) + ' accounts</span><span class="row">' +
+      '<button class="btn small" data-page="' + (data.page-1) + '" ' + (data.page <= 1 ? 'disabled' : '') + '>Previous</button>' +
+      '<button class="btn small" data-page="' + (data.page+1) + '" ' + (data.page >= data.pages ? 'disabled' : '') + '>Next</button></span></div>';
+    $$('[data-user-open]', target).forEach(button => button.addEventListener('click', event => { event.stopPropagation(); openUser(button.dataset.userOpen); }));
+    $$('[data-user]', target).forEach(row => row.addEventListener('click', () => openUser(row.dataset.user)));
+    $$('[data-page]', target).forEach(button => button.addEventListener('click', () => loadUsers(Number(button.dataset.page))));
+  } catch (error) {
+    target.innerHTML = '<div class="error-box">' + h(error.message) + '</div>';
+  }
+}
+async function openUser(id){
+  openModal('<div class="page-loading"><span class="spinner"></span>Loading account…</div>');
+  try {
+    const data = await api('/v1/admin/users/' + encodeURIComponent(id));
+    const user = data.user;
+    const actions = can('users.write')
+      ? '<div class="row" style="margin-top:14px">' +
+          (user.status === 'active'
+            ? '<button class="btn danger" data-user-action="suspend">Suspend account</button>'
+            : '<button class="btn" data-user-action="restore">Reactivate account</button>') +
+          (user.status !== 'deleted' ? '<button class="btn danger" data-user-action="delete">Soft-delete</button>' : '') +
+        '</div>'
+      : '';
+    $('#modal-root').innerHTML = '<div class="modal-backdrop"><div class="modal"><div class="modal-head"><div><h3>' + h(user.displayName || user.username) + '</h3><div class="tiny">@' + h(user.username) + ' · <span class="mono">' + h(user.nexId) + '</span></div></div><button class="icon-btn close" data-close>×</button></div>' +
+      '<div class="grid cards" style="margin-bottom:14px">' + card('Status', statusPill(user.status), '') + card('Devices', fmtNum(data.counts ? user.deviceCount : 0), 'registered') + card('Messages (retained)', fmtNum(data.counts.sent + data.counts.received), fmtNum(data.counts.sent) + ' sent') + card('Calls', fmtNum(data.counts.calls), fmtNum(data.counts.crashes) + ' crashes') + '</div>' +
+      '<h3 style="margin-top:16px">Devices</h3><div class="table-wrap"><table><thead><tr><th>Name</th><th>Platform</th><th>Signal ID</th><th>Last seen</th></tr></thead><tbody>' +
+      data.devices.map(device => '<tr><td>' + h(device.name) + '</td><td>' + h(device.platform) + '</td><td>' + fmtNum(device.signalDeviceId) + '</td><td>' + h(fmtAt(device.lastSeenAt)) + '</td></tr>').join('') +
+      '</tbody></table></div>' +
+      '<h3 style="margin-top:16px">Recent calls</h3>' + (data.calls.length ? callsTable(data.calls) : '<div class="empty">No calls recorded.</div>') +
+      '<h3 style="margin-top:16px">Recent crashes</h3>' + (data.crashes.length ? '<div class="stack">' + data.crashes.map(crash => '<div class="notice"><b>' + h(crash.appVersion || 'unknown version') + '</b> · ' + h(fmtAt(crash.createdAt)) + '<br>' + h(crash.message) + '</div>').join('') + '</div>' : '<div class="empty">No crashes recorded.</div>') +
+      actions + '</div></div>';
+    bindModalClose();
+    $$('[data-user-action]').forEach(button => button.addEventListener('click', () => userAction(user, button.dataset.userAction)));
+  } catch (error) {
+    $('#modal-root').innerHTML = '<div class="modal-backdrop"><div class="modal"><div class="error-box">' + h(error.message) + '</div><button class="btn" data-close>Close</button></div></div>';
+    bindModalClose();
+  }
+}
+function userAction(user, action){
+  const labels = { suspend:'Suspend', restore:'Reactivate', delete:'Soft-delete' };
+  $('#modal-root').innerHTML = '<div class="modal-backdrop"><div class="modal"><div class="modal-head"><div><h3>' + labels[action] + ' ' + h(user.username) + '</h3><p class="hint">This action is written to the audit log.</p></div><button class="icon-btn close" data-close>×</button></div>' +
+    (action === 'suspend' || action === 'delete' ? '<label class="field"><span>Reason (optional, shown to the operator)</span><textarea id="action-reason" maxlength="300"></textarea></label>' : '<div class="notice">The account will be able to sign in again and keep its existing encryption identity.</div>') +
+    '<div class="row end"><button class="btn" data-close>Cancel</button><button class="btn ' + (action === 'restore' ? 'primary' : 'danger') + '" id="action-confirm">' + labels[action] + '</button></div></div></div>';
+  bindModalClose();
+  $('#action-confirm').addEventListener('click', async () => {
+    try {
+      await api('/v1/admin/users/' + encodeURIComponent(user.id), { method:'PATCH', body:{ action, reason: $('#action-reason') ? $('#action-reason').value.trim() : undefined } });
+      toast('Account updated', 'ok'); closeModal(); await loadUsers(state.userPage);
+    } catch (error) { toast(error.message, 'bad'); }
+  });
+}
+async function callsView(){
+  const main = $('#main');
+  main.innerHTML = '<div class="toolbar"><select id="call-status"><option value="">All statuses</option><option value="ringing">Ringing</option><option value="connected">Connected</option><option value="ended">Ended</option><option value="declined">Declined</option><option value="missed">Missed</option><option value="failed">Failed</option></select>' +
+    (can('reports.export') ? '<a class="btn ghost" href="/v1/admin/reports/calls/export.csv?range=' + encodeURIComponent(state.range) + '">Export CSV</a>' : '') +
+    '<span class="grow"></span><span class="tiny">Telemetry is reported by NEXCHAT 1.0.5 and later. No audio or video content is collected.</span></div>' +
+    '<section class="panel"><div id="calls-table"><div class="page-loading"><span class="spinner"></span>Loading calls…</div></div></section>';
+  $('#call-status').value = state.callsStatus;
+  $('#call-status').addEventListener('change', event => { state.callsStatus = event.target.value; state.callsPage = 1; loadCalls(1); });
+  await loadCalls(1);
+}
+async function loadCalls(page){
+  state.callsPage = page;
+  const target = $('#calls-table');
+  if (!target) return;
+  target.innerHTML = '<div class="page-loading"><span class="spinner"></span>Loading calls…</div>';
+  try {
+    const params = new URLSearchParams({ page:String(page), pageSize:'25', range:state.range });
+    if (state.callsStatus) params.set('status', state.callsStatus);
+    const data = await api('/v1/admin/calls?' + params.toString());
+    target.innerHTML = (data.calls.length ? callsTable(data.calls) : '<div class="empty">No calls match this filter.</div>') +
+      '<div class="pager"><span>Page ' + data.page + ' of ' + data.pages + ' · ' + fmtNum(data.total) + ' calls</span><span class="row">' +
+      '<button class="btn small" data-page="' + (data.page-1) + '" ' + (data.page <= 1 ? 'disabled' : '') + '>Previous</button>' +
+      '<button class="btn small" data-page="' + (data.page+1) + '" ' + (data.page >= data.pages ? 'disabled' : '') + '>Next</button></span></div>';
+    bindCallRows();
+    $$('[data-page]', target).forEach(button => button.addEventListener('click', () => loadCalls(Number(button.dataset.page))));
+  } catch (error) {
+    target.innerHTML = '<div class="error-box">' + h(error.message) + '</div>';
+  }
+}
+async function monitoringView(){
+  const data = await api('/v1/admin/monitoring?range=' + encodeURIComponent(state.range));
+  state.monitoring = data;
+  const health = data.health;
+  const main = $('#main');
+  main.innerHTML =
+    '<div class="status-strip"><span><span class="dot ' + (health.dbOk ? 'ok' : 'bad') + '"></span>' + (health.dbOk ? 'Database reachable' : 'Database check failed') + '</span>' +
+      '<span class="pill">DB ' + fmtNum(health.dbLatencyMs) + ' ms</span><span class="pill">Pool ' + fmtNum(health.pool.total) + ' total / ' + fmtNum(health.pool.idle) + ' idle</span>' +
+      '<span class="pill">' + fmtBytes(health.databaseSizeBytes) + '</span><span class="pill">Last heartbeat ' + h(fmtAt(health.lastHeartbeat)) + '</span></div>' +
+    '<div class="grid two">' +
+      '<section class="panel"><h2>Crash reports</h2><p class="hint">' + fmtNum(data.crashTotal) + ' in selected range</p>' + barChart(data.crashSeries) +
+        (data.crashes.length ? '<div class="stack" style="margin-top:14px">' + data.crashes.map(crash => '<details class="notice"><summary><b>' + h(crash.message) + '</b><br><span class="tiny">' + h(crash.appVersion || 'unknown version') + ' · ' + h(crash.platform || 'unknown') + ' · ' + h(fmtAt(crash.createdAt)) + '</span></summary><pre>' + h(crash.stack || 'No stack trace supplied') + '</pre></details>').join('') + '</div>' : '<div class="empty">No crash reports in this range.</div>') +
+      '</section>' +
+      '<section class="panel"><h2>Failed call reasons</h2><p class="hint">Server-reported failure categories</p>' + barList(data.failureReasons, 'count', 'reason', 'red') +
+        '<h3 style="margin-top:22px">Version breakdown</h3>' + barList(data.versions, 'count', 'version') +
+      '</section>' +
+    '</div>' +
+    '<section class="panel" style="margin-top:16px"><h2>Failed, missed and declined calls</h2><p class="hint">Use call detail to correlate with NEXCHAT_CALL device logs</p>' +
+      (data.failedCalls.length ? callsTable(data.failedCalls) : '<div class="empty">No failed calls in this range.</div>') + '</section>' +
+    '<section class="panel" style="margin-top:16px"><h2>Service uptime data</h2><p class="hint">Heartbeats recorded by the protected Vercel cron endpoint</p>' +
+      '<div class="grid cards">' + card('Heartbeats (24h)', health.heartbeats24h === null ? '—' : fmtNum(health.heartbeats24h), 'daily Vercel cron; add an external scheduler for finer detail') +
+      card('Last heartbeat', health.lastHeartbeat ? fmtAt(health.lastHeartbeat) : '—', 'UTC') + card('Runtime', h(health.runtime), h(health.region || 'region unknown')) + card('Process uptime', fmtDuration(health.uptimeSeconds), 'serverless instance') + '</div>' +
+      '<div class="notice" style="margin-top:14px">Uptime is shown only from real heartbeat rows. If the cron is not configured, this section stays empty rather than inventing a percentage.</div>' +
+    '</section>';
+  bindCallRows();
+}
+async function configView(){
+  const data = await api('/v1/admin/config');
+  const config = data.config;
+  const editable = can('config.write');
+  const main = $('#main');
+  main.innerHTML =
+    '<div class="notice">Settings here are returned by <span class="mono">GET /v1/config</span> and cached by Android for 30 seconds. Feature flags affect NEXCHAT 1.0.5 and later; older APKs ignore them.</div>' +
+    '<div class="grid two">' +
+      '<section class="panel"><h2>Remote settings</h2><p class="hint">Current version: ' + fmtNum(config.version) + '</p>' +
+        '<form id="config-form">' +
+          '<label class="check"><input type="checkbox" id="cfg-calls" ' + (config.callsEnabled ? 'checked' : '') + ' ' + (!editable ? 'disabled' : '') + '><span><b>Audio calling enabled</b><small>When disabled, Android refuses new calls and ignores incoming offers.</small></span></label>' +
+          '<label class="check"><input type="checkbox" id="cfg-video" ' + (config.videoCallsEnabled ? 'checked' : '') + ' ' + (!editable ? 'disabled' : '') + '><span><b>Video calling enabled</b><small>Advertises real WebRTC 1:1 video calling to NEXCHAT 1.0.5 and later.</small></span></label>' +
+          '<label class="check"><input type="checkbox" id="cfg-maint" ' + (config.maintenanceMode ? 'checked' : '') + ' ' + (!editable ? 'disabled' : '') + '><span><b>Maintenance banner</b><small>Displays the message below in the Android app. Messaging and calling continue unless separately disabled.</small></span></label>' +
+          '<label class="field"><span>Maximum call duration (seconds)</span><input class="input" id="cfg-max-call" type="number" min="60" max="14400" value="' + h(config.maxCallDurationSeconds) + '" ' + (!editable ? 'disabled' : '') + '></label>' +
+          '<label class="field"><span>Maintenance message</span><textarea id="cfg-maint-message" maxlength="500" ' + (!editable ? 'disabled' : '') + '>' + h(config.maintenanceMessage) + '</textarea></label>' +
+          '<label class="field"><span>Minimum supported app version</span><input class="input" id="cfg-min-version" value="' + h(config.minAppVersion) + '" pattern="\\d+\\.\\d+\\.\\d+" ' + (!editable ? 'disabled' : '') + '></label>' +
+          (editable ? '<button class="btn primary" id="cfg-save" type="submit">Publish configuration</button>' : '<div class="notice">Your role can view but not change remote configuration.</div>') +
+        '</form>' +
+      '</section>' +
+      '<section class="panel"><h2>What can change remotely</h2><p class="hint">Changes that do not require a new APK</p><ul class="muted" style="line-height:1.9;padding-left:18px">' +
+        '<li>Enable or disable audio calling</li><li>Set maximum call duration</li><li>Show a maintenance banner</li><li>Raise the advisory minimum version</li><li>Publish an in-app announcement</li><li>Advertise or hide video calling capability</li></ul>' +
+        '<h3 style="margin-top:20px">Release-bound</h3><p class="hint">These cannot be changed safely from a server</p><ul class="muted" style="line-height:1.9;padding-left:18px">' +
+        data.releaseBound.map(item => '<li>' + h(item) + '</li>').join('') + '</ul>' +
+      '</section>' +
+    '</div>' +
+    '<section class="panel" style="margin-top:16px"><h2>Change history</h2><p class="hint">Every published version is retained for rollback</p>' +
+      (data.history.length ? '<div class="table-wrap"><table><thead><tr><th>Version</th><th>Changed by</th><th>When</th><th>Snapshot</th><th></th></tr></thead><tbody>' +
+        data.history.map(entry => '<tr><td>v' + fmtNum(entry.version) + '</td><td>' + h(entry.adminUsername) + '</td><td>' + h(fmtAt(entry.createdAt)) + '</td><td class="tiny mono">' + h(JSON.stringify(entry.newValue).slice(0,140)) + '…</td><td>' + (editable ? '<button class="btn small" data-rollback="' + h(entry.id) + '">Roll back</button>' : '') + '</td></tr>').join('') +
+        '</tbody></table></div>' : '<div class="empty">No configuration changes yet.</div>') +
+    '</section>';
+  if (editable) {
+    $('#config-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const payload = {
+        callsEnabled: $('#cfg-calls').checked,
+        videoCallsEnabled: $('#cfg-video').checked,
+        maintenanceMode: $('#cfg-maint').checked,
+        maxCallDurationSeconds: Number($('#cfg-max-call').value),
+        maintenanceMessage: $('#cfg-maint-message').value.trim(),
+        minAppVersion: $('#cfg-min-version').value.trim()
+      };
+      if (!/^\d+\.\d+\.\d+$/.test(payload.minAppVersion)) return toast('Minimum version must look like 1.2.3', 'bad');
+      if (!Number.isFinite(payload.maxCallDurationSeconds) || payload.maxCallDurationSeconds < 60) return toast('Maximum call duration must be at least 60 seconds', 'bad');
+      try {
+        await api('/v1/admin/config', { method:'PATCH', body:payload });
+        toast('Configuration published', 'ok'); await configView();
+      } catch (error) { toast(error.message, 'bad'); }
+    });
+    $$('[data-rollback]').forEach(button => button.addEventListener('click', async () => {
+      if (!window.confirm('Restore the configuration that preceded version entry ' + button.dataset.rollback + '?')) return;
+      try {
+        await api('/v1/admin/config/rollback/' + encodeURIComponent(button.dataset.rollback), { method:'POST' });
+        toast('Configuration restored', 'ok'); await configView();
+      } catch (error) { toast(error.message, 'bad'); }
+    }));
+  }
+}
+async function announcementsView(){
+  const data = await api('/v1/admin/announcements');
+  const writable = can('announcements.write');
+  const edit = state.editingAnnouncement;
+  const main = $('#main');
+  main.innerHTML =
+    '<div class="grid two"><section class="panel"><h2>' + (edit ? 'Edit announcement' : 'New announcement') + '</h2><p class="hint">The most recent active announcement is returned by <span class="mono">/v1/config</span>.</p>' +
+      '<form id="announcement-form">' +
+        '<label class="field"><span>Title</span><input class="input" id="ann-title" maxlength="120" required value="' + h(edit ? edit.title : '') + '" ' + (!writable ? 'disabled' : '') + '></label>' +
+        '<label class="field"><span>Message</span><textarea id="ann-body" maxlength="2000" required ' + (!writable ? 'disabled' : '') + '>' + h(edit ? edit.body : '') + '</textarea></label>' +
+        '<div class="row"><label class="field" style="flex:1"><span>Severity</span><select id="ann-severity" ' + (!writable ? 'disabled' : '') + '><option value="info">Information</option><option value="warning">Warning</option><option value="critical">Critical</option></select></label>' +
+        '<label class="field" style="flex:1"><span>Ends at (optional)</span><input class="input" id="ann-ends" type="datetime-local" ' + (!writable ? 'disabled' : '') + '></label></div>' +
+        '<label class="check"><input type="checkbox" id="ann-active" checked ' + (!writable ? 'disabled' : '') + '><span><b>Active</b><small>Only active announcements are delivered to clients.</small></span></label>' +
+        '<div class="row">' + (writable ? '<button class="btn primary" type="submit">' + (edit ? 'Save changes' : 'Publish announcement') + '</button>' : '') + (edit ? '<button class="btn" type="button" id="ann-cancel">Cancel</button>' : '') + '</div>' +
+      '</form></section>' +
+      '<section class="panel"><h2>Published announcements</h2><p class="hint">' + fmtNum(data.announcements.length) + ' total</p>' +
+        (data.announcements.length ? '<div class="stack">' + data.announcements.map(item =>
+          '<div class="notice ' + (item.severity === 'critical' ? 'bad' : item.severity === 'warning' ? 'warn' : '') + '"><div class="row"><b>' + h(item.title) + '</b><span class="pill ' + (item.active ? 'ok' : '') + '">' + (item.active ? 'active' : 'inactive') + '</span><span class="grow"></span>' +
+          (writable ? '<button class="btn small" data-ann-edit="' + h(item.id) + '">Edit</button><button class="btn small danger" data-ann-delete="' + h(item.id) + '">Delete</button>' : '') + '</div><div style="margin-top:6px">' + h(item.body) + '</div><div class="tiny" style="margin-top:6px">' + h(item.severity) + ' · starts ' + h(fmtAt(item.startsAt)) + (item.endsAt ? ' · ends ' + h(fmtAt(item.endsAt)) : '') + '</div></div>'
+        ).join('') + '</div>' : '<div class="empty">No announcements yet.</div>') +
+      '</section></div>';
+  if (edit) $('#ann-severity').value = edit.severity;
+  if (edit && edit.endsAt) {
+    const date = new Date(edit.endsAt);
+    if (!Number.isNaN(date.getTime())) $('#ann-ends').value = new Date(date.getTime() - date.getTimezoneOffset()*60000).toISOString().slice(0,16);
+  }
+  if (writable) {
+    $('#announcement-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const payload = {
+        title: $('#ann-title').value.trim(), body: $('#ann-body').value.trim(),
+        severity: $('#ann-severity').value, active: $('#ann-active').checked,
+        endsAt: $('#ann-ends').value ? new Date($('#ann-ends').value).toISOString() : null
+      };
+      try {
+        if (edit) await api('/v1/admin/announcements/' + encodeURIComponent(edit.id), { method:'PATCH', body:payload });
+        else await api('/v1/admin/announcements', { method:'POST', body:payload });
+        state.editingAnnouncement = null; toast('Announcement saved', 'ok'); await announcementsView();
+      } catch (error) { toast(error.message, 'bad'); }
+    });
+    const cancel = $('#ann-cancel');
+    if (cancel) cancel.addEventListener('click', () => { state.editingAnnouncement = null; announcementsView(); });
+    $$('[data-ann-edit]').forEach(button => button.addEventListener('click', () => { state.editingAnnouncement = data.announcements.find(item => item.id === button.dataset.annEdit); announcementsView(); }));
+    $$('[data-ann-delete]').forEach(button => button.addEventListener('click', async () => {
+      if (!window.confirm('Delete this announcement permanently?')) return;
+      try { await api('/v1/admin/announcements/' + encodeURIComponent(button.dataset.annDelete), { method:'DELETE' }); toast('Announcement deleted', 'ok'); await announcementsView(); }
+      catch (error) { toast(error.message, 'bad'); }
+    }));
+  }
+}
+async function auditView(){
+  const data = await api('/v1/admin/audit?range=' + encodeURIComponent(state.range) + '&page=' + state.auditPage + '&pageSize=25&action=' + encodeURIComponent(state.auditAction));
+  const main = $('#main');
+  main.innerHTML = '<div class="toolbar"><input class="input" id="audit-action" placeholder="Filter action prefix, e.g. user." value="' + h(state.auditAction) + '" style="min-width:260px">' +
+    (can('reports.export') ? '<a class="btn ghost" href="/v1/admin/reports/audit/export.csv?range=' + encodeURIComponent(state.range) + '">Export CSV</a>' : '') + '</div>' +
+    '<section class="panel">' + (data.logs.length ? '<div class="table-wrap"><table><thead><tr><th>When</th><th>Administrator</th><th>Action</th><th>Target</th><th>IP</th></tr></thead><tbody>' +
+      data.logs.map(log => '<tr><td>' + h(fmtAt(log.createdAt)) + '</td><td>' + h(log.adminUsername) + '</td><td class="mono">' + h(log.action) + '</td><td>' + h(log.targetType || '—') + (log.targetId ? ' <span class="tiny mono">' + h(String(log.targetId).slice(0,16)) + '</span>' : '') + '</td><td class="tiny">' + h(log.ip || '—') + '</td></tr>').join('') +
+      '</tbody></table></div>' : '<div class="empty">No audit entries in this range.</div>') +
+      '<div class="pager"><span>Page ' + data.page + ' of ' + data.pages + ' · ' + fmtNum(data.total) + ' entries</span><span class="row"><button class="btn small" id="audit-prev" ' + (data.page <= 1 ? 'disabled' : '') + '>Previous</button><button class="btn small" id="audit-next" ' + (data.page >= data.pages ? 'disabled' : '') + '>Next</button></span></div>' +
+    '</section>';
+  $('#audit-action').addEventListener('keydown', event => { if (event.key === 'Enter') { state.auditAction = event.target.value.trim(); state.auditPage = 1; auditView(); } });
+  $('#audit-prev').addEventListener('click', () => { state.auditPage = Math.max(1, state.auditPage-1); auditView(); });
+  $('#audit-next').addEventListener('click', () => { state.auditPage += 1; auditView(); });
+}
+async function adminsView(){
+  const data = await api('/v1/admin/admins');
+  const main = $('#main');
+  main.innerHTML = '<div class="grid two"><section class="panel"><h2>Administrators</h2><p class="hint">Super admin privileges are required to manage access.</p>' +
+    '<div class="table-wrap"><table><thead><tr><th>Account</th><th>Role</th><th>Status</th><th>Last login</th><th></th></tr></thead><tbody>' +
+    data.admins.map(admin => '<tr><td><div class="name">' + h(admin.displayName) + '</div><div class="tiny">@' + h(admin.username) + '</div></td>' +
+      '<td>' + h(admin.role) + '</td><td>' + statusPill(admin.active ? 'active' : 'suspended') + '</td><td>' + h(fmtAt(admin.lastLoginAt)) + '</td>' +
+      '<td class="row"><button class="btn small" data-reset="' + h(admin.id) + '">Reset 2FA</button><button class="btn small ' + (admin.active ? 'danger' : '') + '" data-toggle-admin="' + h(admin.id) + '" data-active="' + (admin.active ? '1' : '0') + '">' + (admin.active ? 'Disable' : 'Enable') + '</button>' +
+      (admin.id !== state.admin.id ? '<button class="btn small danger" data-delete-admin="' + h(admin.id) + '" data-admin-name="' + h(admin.username) + '">Delete</button>' : '') +
+      '</td></tr>').join('') +
+    '</tbody></table></div></section>' +
+    '<section class="panel"><h2>Add administrator</h2><p class="hint">The authenticator secret is returned once after creation.</p><form id="admin-form">' +
+      '<label class="field"><span>Username</span><input class="input" id="adm-username" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_.-]{3,32}"></label>' +
+      '<label class="field"><span>Display name</span><input class="input" id="adm-display" required maxlength="60"></label>' +
+      '<label class="field"><span>Password (12+ characters)</span><input class="input" id="adm-password" type="password" required minlength="12" maxlength="128" autocomplete="new-password"></label>' +
+      '<label class="field"><span>Role</span><select id="adm-role"><option value="admin">Admin — operations</option><option value="support">Support — user assistance</option><option value="analyst">Analyst — read-only</option><option value="super_admin">Super admin — full control</option></select></label>' +
+      '<button class="btn primary" type="submit">Create administrator</button></form></section></div>';
+  $('#admin-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    try {
+      const created = await api('/v1/admin/admins', { method:'POST', body:{ username:$('#adm-username').value.trim(), displayName:$('#adm-display').value.trim(), password:$('#adm-password').value, role:$('#adm-role').value } });
+      openModal('<div class="modal-head"><div><h3>Authenticator secret for @' + h(created.username) + '</h3><p class="hint">Give this to the administrator through a secure channel. It is shown once.</p></div><button class="icon-btn close" data-close>×</button></div>' +
+        enrollmentHtml(created) +
+        '<button class="btn primary" data-close>Done</button>');
+      bindModalClose(); toast('Administrator created', 'ok'); await adminsView();
+    } catch (error) { toast(error.message, 'bad'); }
+  });
+  $$('[data-reset]').forEach(button => button.addEventListener('click', async () => {
+    if (!window.confirm('Reset 2FA? All sessions for that administrator will be revoked.')) return;
+    try {
+      const result = await api('/v1/admin/admins/' + encodeURIComponent(button.dataset.reset) + '/reset-2fa', { method:'POST' });
+      openModal('<div class="modal-head"><div><h3>New authenticator secret</h3><p class="hint">Shown once. Existing sessions were revoked.</p></div><button class="icon-btn close" data-close>×</button></div>' +
+        enrollmentHtml(result) + '<button class="btn primary" data-close>Done</button>');
+      bindModalClose();
+    } catch (error) { toast(error.message, 'bad'); }
+  }));
+  $$('[data-toggle-admin]').forEach(button => button.addEventListener('click', async () => {
+    const active = button.dataset.active === '1';
+    if (!window.confirm((active ? 'Disable' : 'Enable') + ' this administrator?')) return;
+    try {
+      await api('/v1/admin/admins/' + encodeURIComponent(button.dataset.toggleAdmin), { method:'PATCH', body:{ active:!active } });
+      toast('Administrator updated', 'ok'); await adminsView();
+    } catch (error) { toast(error.message, 'bad'); }
+  }));
+  $$('[data-delete-admin]').forEach(button => button.addEventListener('click', async () => {
+    if (!window.confirm('Delete @' + button.dataset.adminName + ' permanently? Their sessions and 2FA secret are removed.')) return;
+    try {
+      await api('/v1/admin/admins/' + encodeURIComponent(button.dataset.deleteAdmin), { method:'DELETE' });
+      toast('Administrator deleted', 'ok'); await adminsView();
+    } catch (error) { toast(error.message, 'bad'); }
+  }));
+}
+async function accountView(){
+  const sessions = await api('/v1/admin/sessions');
+  const main = $('#main');
+  main.innerHTML = '<div class="grid two"><section class="panel"><h2>Change password</h2><p class="hint">Requires your current password and a fresh authenticator code. Other sessions are revoked.</p><form id="password-form">' +
+    '<label class="field"><span>Current password</span><input class="input" id="pwd-current" type="password" required autocomplete="current-password"></label>' +
+    '<label class="field"><span>New password (12+ characters)</span><input class="input" id="pwd-new" type="password" required minlength="12" autocomplete="new-password"></label>' +
+    '<label class="field"><span>Authenticator code</span><input class="input" id="pwd-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required autocomplete="one-time-code"></label>' +
+    '<button class="btn primary" type="submit">Update password</button></form></section>' +
+    '<section class="panel"><h2>Active sessions</h2><p class="hint">Sessions are HttpOnly cookies bound to this browser.</p><div class="stack">' +
+      sessions.sessions.map(session => '<div class="notice"><div class="row"><b>' + (session.current ? 'This session' : 'Session') + '</b><span class="grow"></span>' + (session.current ? '<span class="pill ok">current</span>' : '<button class="btn small danger" data-revoke="' + h(session.id) + '">Revoke</button>') + '</div><div class="tiny">Created ' + h(fmtAt(session.createdAt)) + ' · expires ' + h(fmtAt(session.expiresAt)) + '<br>' + h(session.userAgent || 'unknown browser') + ' · ' + h(session.ip || 'unknown IP') + '</div></div>').join('') +
+    '</div></section></div>';
+  $('#password-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    try {
+      await api('/v1/admin/auth/password', { method:'POST', allow401:true, body:{ currentPassword:$('#pwd-current').value, newPassword:$('#pwd-new').value, code:$('#pwd-code').value.trim() } });
+      toast('Password updated. Other sessions revoked.', 'ok'); await accountView();
+    } catch (error) { toast(error.message, 'bad'); }
+  });
+  $$('[data-revoke]').forEach(button => button.addEventListener('click', async () => {
+    try { await api('/v1/admin/sessions/' + encodeURIComponent(button.dataset.revoke), { method:'DELETE' }); toast('Session revoked', 'ok'); await accountView(); }
+    catch (error) { toast(error.message, 'bad'); }
+  }));
+}
+function openModal(html){
+  $('#modal-root').innerHTML = '<div class="modal-backdrop"><div class="modal">' + html + '</div></div>';
+  bindModalClose();
+}
+function closeModal(){ $('#modal-root').innerHTML = ''; }
+function bindModalClose(){
+  $$('[data-close]').forEach(button => button.addEventListener('click', closeModal));
+  const backdrop = $('#modal-root .modal-backdrop');
+  if (backdrop) backdrop.addEventListener('click', event => { if (event.target === backdrop) closeModal(); });
+}
+document.addEventListener('keydown', event => { if (event.key === 'Escape') closeModal(); });
+boot();
+</script>
+</body>
+</html>

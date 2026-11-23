@@ -4,13 +4,16 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
+import android.content.Intent
 import android.media.AudioAttributes
 import android.media.RingtoneManager
 import android.os.Build
+import androidx.core.content.ContextCompat
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import com.nexchat.app.call.CallManager
+import com.nexchat.app.core.config.RemoteConfigStore
 import com.nexchat.app.core.crypto.NexSignalStore
 import com.nexchat.app.core.crypto.SignalCryptoManager
 import com.nexchat.app.core.db.DatabaseProvider
@@ -19,6 +22,7 @@ import com.nexchat.app.core.network.ApiClient
 import com.nexchat.app.core.network.NexJson
 import com.nexchat.app.core.security.SecureSessionStore
 import com.nexchat.app.core.settings.SettingsStore
+import com.nexchat.app.core.telemetry.Telemetry
 import com.nexchat.app.data.AuthRepository
 import com.nexchat.app.data.AuthState
 import com.nexchat.app.data.ChatEvent
@@ -26,6 +30,7 @@ import com.nexchat.app.data.ChatRepository
 import com.nexchat.app.data.ContactRepository
 import com.nexchat.app.net.WebSocketManager
 import com.nexchat.app.service.CleanupWorker
+import com.nexchat.app.service.MessagingService
 import com.nexchat.app.service.NotificationHelper
 import com.nexchat.app.service.OutboxWorker
 import java.util.concurrent.TimeUnit
@@ -54,7 +59,11 @@ class AppContainer(val app: Application) {
     val auth: AuthRepository by lazy { AuthRepository(db, api, secure, crypto, settings, scope) }
     val chat: ChatRepository by lazy { ChatRepository(db, api, crypto, settings) }
     val contacts: ContactRepository by lazy { ContactRepository(db, api, crypto) }
-    val call: CallManager by lazy { CallManager(app, scope, chat, api, notifications) }
+    val remoteConfig: RemoteConfigStore by lazy { RemoteConfigStore(app, api) }
+    val telemetry: Telemetry by lazy { Telemetry(app, api, auth, scope) }
+    val call: CallManager by lazy {
+        CallManager(app, scope, chat, api, notifications, remoteConfig, telemetry)
+    }
     val websocket: WebSocketManager by lazy { WebSocketManager(api, chat, auth, scope, app) }
 
     private val _startupError = MutableStateFlow<String?>(null)
@@ -66,6 +75,8 @@ class AppContainer(val app: Application) {
         retryBootstrap()
         scheduleCleanup()
         scheduleOutbox()
+        remoteConfig.start(scope)
+        telemetry.start()
     }
 
     fun retryBootstrap() {
@@ -84,13 +95,20 @@ class AppContainer(val app: Application) {
         scope.launch {
             auth.state.collectLatest { state ->
                 if (state is AuthState.LoggedIn) {
+                    startMessagingService()
                     websocket.start()
+                    scope.launch { runCatching { remoteConfig.refresh() } }
                     // Repair one-time/Kyber key exhaustion after upgrades and
                     // reconnects so contacts can always fetch a usable bundle.
                     scope.launch { runCatching { chat.ensurePublishedKeys() } }
                     // Drain anything composed while the process was offline.
                     scope.launch { runCatching { chat.flushOutbox() } }
+                    scope.launch { runCatching { chat.flushCallSignals() } }
                 } else {
+                    // An active call cannot survive a signed-out session: its
+                    // sender device, keys and signaling token are all gone.
+                    runCatching { call.teardown() }
+                    stopMessagingService()
                     websocket.stop()
                 }
             }
@@ -107,14 +125,32 @@ class AppContainer(val app: Application) {
                             )
                         }
                     }
-                    is ChatEvent.Security -> {
-                        notifications.showSecurity(event.nexId, event.message)
-                    }
+                    // Security-session changes are reflected in the contact screen
+                    // instead of raising an automatic status pop-up/notification.
+                    is ChatEvent.Security -> Unit
                     is ChatEvent.Call -> call.onSignal(event.event)
                     else -> Unit
                 }
             }
         }
+    }
+
+    /**
+     * Delivery must not depend on a Compose screen being visible. Starting the
+     * service from the auth state keeps the WebSocket/long-poll alive when the
+     * user leaves the conversation list or locks the screen.
+     */
+    private fun startMessagingService() {
+        runCatching {
+            ContextCompat.startForegroundService(
+                app,
+                Intent(app, MessagingService::class.java),
+            )
+        }
+    }
+
+    private fun stopMessagingService() {
+        runCatching { app.stopService(Intent(app, MessagingService::class.java)) }
     }
 
     private fun scheduleCleanup() {
@@ -192,6 +228,7 @@ class NexChatApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        Telemetry.installCrashHandler(this)
         container = AppContainer(this)
         container.notificationChannels()
         container.bootstrap()

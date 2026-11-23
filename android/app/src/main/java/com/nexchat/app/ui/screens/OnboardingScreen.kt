@@ -40,6 +40,7 @@ import com.nexchat.app.ui.components.GlassCard
 import com.nexchat.app.ui.components.PrimaryButton
 import com.nexchat.app.ui.components.SilverBackground
 import com.nexchat.app.ui.theme.LocalNexPalette
+import com.nexchat.app.ui.theme.atSize
 
 @Composable
 fun OnboardingScreen(
@@ -68,7 +69,7 @@ fun OnboardingScreen(
                 Spacer(Modifier.width(8.dp))
                 Text(
                     "NEXCHAT / PRIVATE MESSENGER",
-                    style = MaterialTheme.typography.labelMedium.copy(letterSpacing = 2.4.sp),
+                    style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.6.sp),
                     color = palette.textMuted,
                 )
             }
@@ -77,7 +78,7 @@ fun OnboardingScreen(
             Spacer(Modifier.height(26.dp))
             Text(
                 "Private by design.",
-                style = MaterialTheme.typography.displayLarge.copy(fontSize = 43.sp),
+                style = MaterialTheme.typography.displayLarge.atSize(38.sp),
                 color = palette.textPrimary,
                 textAlign = TextAlign.Center,
             )

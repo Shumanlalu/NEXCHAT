@@ -274,6 +274,9 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): 
       await hashPassword(body.password);
       throw new HttpError(401, "INVALID_CREDENTIALS", "Incorrect username or password");
     }
+    if (user.suspended_at) {
+      throw new HttpError(403, "ACCOUNT_SUSPENDED", "This account is suspended");
+    }
     const valid = await verifyPassword(body.password, user.password_hash, user.password_salt);
     if (!valid) throw new HttpError(401, "INVALID_CREDENTIALS", "Incorrect username or password");
 
@@ -320,6 +323,9 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): 
       "SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL",
       [row.user_id],
     );
+    if (user?.suspended_at) {
+      throw new HttpError(403, "ACCOUNT_SUSPENDED", "This account is suspended");
+    }
     const device = await db.one<DeviceRow>(
       "SELECT * FROM devices WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL",
       [row.device_id, row.user_id],

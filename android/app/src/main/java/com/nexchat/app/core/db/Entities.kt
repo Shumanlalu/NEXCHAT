@@ -87,7 +87,50 @@ object MessageKind {
     const val SYSTEM = "SYSTEM"
     const val CALL = "CALL"
     const val GROUP_META = "GROUP_META"
+    const val ATTACHMENT = "ATTACHMENT"
 }
+
+object AttachmentState {
+    const val SENDING = "SENDING"
+    const val RECEIVING = "RECEIVING"
+    const val READY = "READY"
+    const val FAILED = "FAILED"
+}
+
+/**
+ * Metadata for an end-to-end encrypted file. Plaintext bytes never leave the
+ * SQLCipher database; the relay only ever sees Signal-encrypted chunk rows.
+ */
+@Entity(
+    tableName = "attachments",
+    indices = [Index(value = ["createdAt"])],
+)
+data class AttachmentEntity(
+    @PrimaryKey val id: String,
+    val fileName: String,
+    val mimeType: String,
+    val fileSize: Long,
+    val sha256: String,
+    val chunkCount: Int,
+    val state: String = AttachmentState.RECEIVING,
+    val createdAt: Long,
+)
+
+/** One encrypted-envelope chunk of an attachment, kept inside SQLCipher. */
+@Entity(
+    tableName = "attachment_chunks",
+    primaryKeys = ["attachmentId", "index"],
+    indices = [Index(value = ["clientId"])],
+)
+data class AttachmentChunkEntity(
+    val attachmentId: String,
+    val index: Int,
+    val clientId: String,
+    val data: ByteArray,
+    val createdAt: Long,
+    /** Outgoing chunks start false; received chunks are already complete. */
+    val sent: Boolean = false,
+)
 
 object MessageStatus {
     const val PENDING = "PENDING"
@@ -183,6 +226,41 @@ data class PendingIntentEntity(
      * Signal ratchet and are retried from the outbox.
      */
     val materializedAt: Long? = null,
+)
+
+/**
+ * Dedicated signaling queue for the active call. It is deliberately separate
+ * from [PendingIntentEntity] and [OutboxEntity]: call SDP/ICE is only useful
+ * for tens of seconds, so it must retry every second or two instead of
+ * inheriting the message queue's multi-minute exponential backoff.
+ *
+ * The sealed [SecureContent] JSON is stored instead of ciphertext because a
+ * targeted answer/ICE signal may need re-encryption if the peer rotates a
+ * device mid-call. It is inside SQLCipher, like every other local queue.
+ */
+@Entity(
+    tableName = "call_outbox",
+    indices = [
+        Index(value = ["nextAttemptAt"]),
+        Index(value = ["createdAt"]),
+        Index(value = ["expiresAt"]),
+        Index(value = ["callId"]),
+    ],
+)
+data class CallOutboxEntity(
+    @PrimaryKey val id: String,
+    val callId: String,
+    val kind: String,
+    val conversationId: String,
+    val contentJson: String,
+    /** Send only to the device that is actually in this call, when known. */
+    val targetSignalDeviceId: Int? = null,
+    val createdAt: Long,
+    val expiresAt: Long,
+    val attempts: Int = 0,
+    val lastAttemptAt: Long? = null,
+    @ColumnInfo(defaultValue = "0") val nextAttemptAt: Long = 0,
+    val lastError: String? = null,
 )
 
 @Entity(

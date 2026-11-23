@@ -44,6 +44,7 @@ import com.nexchat.app.ui.components.PrimaryButton
 import com.nexchat.app.ui.components.SilverBackground
 import com.nexchat.app.ui.nexViewModel
 import com.nexchat.app.ui.theme.LocalNexPalette
+import com.nexchat.app.ui.theme.atSize
 import com.nexchat.app.ui.viewmodel.AuthMode
 import com.nexchat.app.ui.viewmodel.AuthViewModel
 
@@ -82,7 +83,7 @@ fun AuthScreen(
             Spacer(Modifier.height(16.dp))
             Text(
                 if (state.mode == AuthMode.LOGIN) "WELCOME BACK" else "NEW IDENTITY",
-                style = MaterialTheme.typography.labelMedium.copy(letterSpacing = 2.8.sp),
+                style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.6.sp),
                 color = palette.textMuted,
             )
             Spacer(Modifier.height(8.dp))
@@ -258,10 +259,8 @@ private fun ModePill(
     ) {
         Text(
             label,
-            style = MaterialTheme.typography.labelLarge,
-            color = if (selected) androidx.compose.ui.graphics.Color.White else palette.textSecondary,
-            fontWeight = FontWeight.Bold,
-            fontSize = 13.sp,
+            style = MaterialTheme.typography.labelLarge.atSize(13.sp),
+            color = if (selected) palette.onAccent else palette.textSecondary,
         )
     }
 }

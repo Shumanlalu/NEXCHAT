@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nexchat.app.ui.theme.LocalNexPalette
+import com.nexchat.app.ui.theme.atSize
 
 @Composable
 fun GlassIconButton(
@@ -48,7 +49,7 @@ fun GlassIconButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     tint: Color? = null,
-    size: Dp = 42.dp,
+    size: Dp = 40.dp,
     enabled: Boolean = true,
 ) {
     val palette = LocalNexPalette.current
@@ -57,7 +58,7 @@ fun GlassIconButton(
             .size(size)
             .clip(CircleShape)
             .background(palette.glass)
-            .border(1.dp, palette.glassBorder, CircleShape)
+            .border(1.dp, palette.divider, CircleShape)
             .clickable(enabled = enabled, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
@@ -129,37 +130,39 @@ fun ScreenTitle(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 14.dp),
+            .padding(horizontal = 20.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
             if (eyebrow != null) {
                 Text(
                     eyebrow.uppercase(),
-                    style = MaterialTheme.typography.labelMedium.copy(
-                        letterSpacing = 2.2.sp,
-                        fontSize = 10.sp,
-                    ),
+                    style = MaterialTheme.typography.labelSmall.atSize(11.sp).copy(letterSpacing = 0.8.sp),
                     color = palette.textMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
-                Spacer(Modifier.height(4.dp))
+                Spacer(Modifier.height(3.dp))
             }
             Text(
                 title,
-                style = MaterialTheme.typography.displayMedium.copy(fontSize = 31.sp),
+                style = MaterialTheme.typography.headlineMedium.atSize(26.sp),
                 color = palette.textPrimary,
-                maxLines = 1,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
             if (subtitle != null) {
-                Spacer(Modifier.height(3.dp))
+                Spacer(Modifier.height(2.dp))
                 Text(
                     subtitle,
                     style = MaterialTheme.typography.bodySmall,
                     color = palette.textSecondary,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
         }
+        Spacer(Modifier.width(8.dp))
         trailing()
     }
 }
@@ -171,12 +174,12 @@ fun StatusPill(
     modifier: Modifier = Modifier,
     icon: ImageVector? = null,
 ) {
+    val shape = RoundedCornerShape(8.dp)
     Row(
         modifier = modifier
-            .clip(RoundedCornerShape(50))
-            .background(color.copy(alpha = 0.14f))
-            .border(1.dp, color.copy(alpha = 0.35f), RoundedCornerShape(50))
-            .padding(horizontal = 10.dp, vertical = 5.dp),
+            .clip(shape)
+            .background(color.copy(alpha = 0.12f))
+            .padding(horizontal = 9.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (icon != null) {
@@ -193,8 +196,10 @@ fun StatusPill(
         }
         Text(
             text,
-            style = MaterialTheme.typography.labelMedium.copy(fontSize = 10.sp, letterSpacing = 0.6.sp),
+            style = MaterialTheme.typography.labelSmall.atSize(11.sp),
             color = color,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }
@@ -219,47 +224,49 @@ fun NexBottomBar(
     modifier: Modifier = Modifier,
 ) {
     val palette = LocalNexPalette.current
-    Box(
+    Column(
         modifier = modifier
             .fillMaxWidth()
             .navigationBarsPadding()
-            .padding(horizontal = 16.dp, vertical = 10.dp),
+            .background(palette.navGlass),
     ) {
-        GlassCard(
-            strong = true,
-            corner = 30.dp,
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 7.dp),
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(1.dp)
+                .background(palette.divider),
+        )
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                MainTabs.forEach { tab ->
-                    val selected = currentRoute == tab.route
-                    Column(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(22.dp))
-                            .background(if (selected) palette.accentSoft else Color.Transparent)
-                            .clickable { onSelect(tab.route) }
-                            .padding(vertical = 8.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                    ) {
-                        Icon(
-                            tab.icon,
-                            contentDescription = tab.label,
-                            tint = if (selected) palette.accent else palette.textMuted,
-                            modifier = Modifier.size(22.dp),
-                        )
-                        Spacer(Modifier.height(3.dp))
-                        Text(
-                            tab.label,
-                            style = MaterialTheme.typography.labelMedium.copy(fontSize = 10.sp),
-                            color = if (selected) palette.accent else palette.textMuted,
-                            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                        )
-                    }
+            MainTabs.forEach { tab ->
+                val selected = currentRoute == tab.route
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (selected) palette.accentSoft else Color.Transparent)
+                        .clickable { onSelect(tab.route) }
+                        .padding(vertical = 7.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Icon(
+                        tab.icon,
+                        contentDescription = tab.label,
+                        tint = if (selected) palette.accent else palette.textMuted,
+                        modifier = Modifier.size(21.dp),
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        tab.label,
+                        style = MaterialTheme.typography.labelSmall.atSize(10.sp),
+                        color = if (selected) palette.accent else palette.textMuted,
+                        maxLines = 1,
+                    )
                 }
             }
         }
@@ -280,7 +287,7 @@ fun ConfirmDialog(
         onDismissRequest = onDismiss,
         containerColor = palette.glassStrong,
         textContentColor = palette.textSecondary,
-        shape = RoundedCornerShape(26.dp),
+        shape = RoundedCornerShape(20.dp),
         title = { Text(title, style = MaterialTheme.typography.titleLarge) },
         text = { Text(message, style = MaterialTheme.typography.bodyMedium) },
         confirmButton = {

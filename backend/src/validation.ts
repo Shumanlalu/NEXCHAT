@@ -107,7 +107,10 @@ export const sendEnvelopeSchema = z.object({
         ciphertext: base64(131_072, "ciphertext"),
         cipherType: z.number().int().min(0).max(10),
         ephemeral: z.boolean().default(false),
-        expiresInSeconds: z.number().int().min(10).max(7 * 24 * 3600).default(7 * 24 * 3600),
+        // Call signals may have only a few seconds left when a retry is sent.
+        // Rejecting those with a 400 kept them cycling until they expired.
+        expiresInSeconds: z.number().int().min(5).max(7 * 24 * 3600).default(7 * 24 * 3600),
+        priority: z.boolean().default(false),
         groupId: z.string().uuid().nullable().optional(),
       }),
     )

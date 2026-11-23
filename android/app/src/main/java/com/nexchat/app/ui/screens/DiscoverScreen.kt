@@ -58,6 +58,7 @@ import com.nexchat.app.ui.components.SectionTitle
 import com.nexchat.app.ui.components.StatusPill
 import com.nexchat.app.ui.nexViewModel
 import com.nexchat.app.ui.theme.LocalNexPalette
+import com.nexchat.app.ui.theme.atSize
 import com.nexchat.app.ui.viewmodel.DiscoverViewModel
 import kotlinx.coroutines.launch
 
@@ -110,7 +111,7 @@ fun DiscoverScreen(
                         Column(Modifier.weight(1f)) {
                             Text(
                                 profile?.displayName ?: "Your profile",
-                                style = MaterialTheme.typography.headlineMedium.copy(fontSize = 22.sp),
+                                style = MaterialTheme.typography.headlineMedium,
                                 color = palette.textPrimary,
                                 fontWeight = FontWeight.Bold,
                             )
@@ -145,21 +146,18 @@ fun DiscoverScreen(
                         Column(Modifier.weight(1f)) {
                             Text(
                                 "YOUR NEX ID",
-                                style = MaterialTheme.typography.labelMedium.copy(
-                                    letterSpacing = 1.8.sp,
-                                    fontSize = 9.sp,
-                                ),
+                                style = MaterialTheme.typography.labelSmall.atSize(10.sp)
+                                    .copy(letterSpacing = 0.4.sp),
                                 color = palette.textMuted,
+                                maxLines = 1,
                             )
                             Spacer(Modifier.height(3.dp))
                             Text(
                                 profile?.nexId ?: "—",
-                                style = MaterialTheme.typography.titleMedium.copy(
-                                    fontSize = 17.sp,
-                                    letterSpacing = 1.2.sp,
-                                ),
+                                style = MaterialTheme.typography.titleMedium.atSize(17.sp),
                                 color = palette.textPrimary,
-                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                             )
                         }
                         Icon(
@@ -283,9 +281,9 @@ fun DiscoverScreen(
                 CapabilityCard(
                     icon = Icons.Outlined.Call,
                     title = "Encrypted calls",
-                    body = "Voice and video calling is not implemented in this build. No microphone access is requested.",
-                    state = "Not in this build",
-                    available = false,
+                    body = "One-to-one voice calls are end-to-end encrypted. Video calling is not available yet.",
+                    state = "Voice available",
+                    available = true,
                     modifier = Modifier.padding(horizontal = 18.dp),
                 )
             }
