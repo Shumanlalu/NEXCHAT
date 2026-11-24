@@ -114,7 +114,8 @@ WebSocket endpoint on the same port.
 
 ### Local development
 
-Requirements: Node.js 20+, PostgreSQL 16, and npm.
+Requirements: Node.js 24.x (matches `backend/package.json` and `Dockerfile`),
+PostgreSQL 16, and npm.
 
 ```powershell
 Set-Location backend
@@ -138,18 +139,21 @@ https://nexchat-three.vercel.app
 ```
 
 It runs the Fastify server as a Vercel Node.js Function and stores data in a Neon
-PostgreSQL database provisioned through the Vercel Marketplace. The Vercel
-project is `shuman2/nexchat`; the database and all secrets are production-only
-environment variables and are not in this repository. For a self-hosted
-alternative that keeps a persistent process, use the Docker stack above.
+PostgreSQL database provisioned through the Vercel Marketplace. The linked
+project is defined by `.vercel/project.json`; run `vercel link` against your own
+project instead of copying an owner name. The database and all secrets are
+production-only environment variables and are not in this repository. For a
+self-hosted alternative that keeps a persistent process, use the Docker stack
+above.
 
 Vercel Functions have a maximum WebSocket lifetime (300 seconds on the Hobby
 plan). The Android client reconnects with exponential backoff and polls the
 encrypted-envelope queue every 5 seconds while a chat is visible, so messages
-still arrive if a socket expires or a push reaches a different function
-instance. For guaranteed low-latency realtime fan-out at scale, deploy the
-Docker server on a host that keeps one process running, or add a shared pub/sub
-layer.
+still arrive if a socket expires. **Push notifications are not configured**
+(FCM is absent and `/v1/config` reports `pushNotifications: false`); a fully
+backgrounded app relies on the nearby Bluetooth relay or the next active
+poll. For guaranteed low-latency realtime fan-out at scale, deploy the Docker
+server on a host that keeps one process running, or add a shared pub/sub layer.
 
 ### Super Admin Panel
 

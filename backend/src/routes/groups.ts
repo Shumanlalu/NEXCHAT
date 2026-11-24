@@ -61,6 +61,7 @@ async function groupDetails(db: Database, groupId: string) {
     `SELECT gm.user_id, gm.role, gm.joined_at, u.nex_id, u.username, u.display_name, u.avatar
      FROM group_members gm JOIN users u ON u.id = gm.user_id
      WHERE gm.group_id = $1 AND gm.removed_at IS NULL AND u.deleted_at IS NULL
+       AND u.suspended_at IS NULL AND u.banned_at IS NULL
      ORDER BY gm.joined_at ASC`,
     [groupId],
   );
@@ -77,7 +78,9 @@ async function findUsersByNexIds(db: Database, nexIds: string[]): Promise<UserRo
   const unique = [...new Set(nexIds)];
   const placeholders = unique.map((_, i) => `$${i + 1}`).join(",");
   return db.query<UserRow>(
-    `SELECT * FROM users WHERE nex_id IN (${placeholders}) AND deleted_at IS NULL`,
+    `SELECT * FROM users
+     WHERE nex_id IN (${placeholders}) AND deleted_at IS NULL
+       AND suspended_at IS NULL AND banned_at IS NULL`,
     unique,
   );
 }
@@ -143,21 +146,27 @@ export async function registerGroupRoutes(app: FastifyInstance, deps: Deps): Pro
     if (users.length !== new Set(body.memberNexIds).size) {
       throw new HttpError(404, "MEMBER_NOT_FOUND", "One or more NEX IDs do not exist");
     }
-    const count = await db.one<{ count: string | number }>(
-      "SELECT COUNT(*) AS count FROM group_members WHERE group_id = $1 AND removed_at IS NULL",
-      [groupId],
-    );
-    if (Number(count?.count ?? 0) + users.length > 100) {
-      throw new HttpError(400, "GROUP_TOO_LARGE", "Groups support up to 100 members");
-    }
-    for (const user of users) {
-      await db.query(
-        `INSERT INTO group_members (group_id, user_id, role)
-         VALUES ($1,$2,'member')
-         ON CONFLICT (group_id, user_id) DO UPDATE SET removed_at = NULL, role = 'member', joined_at = now()`,
-        [groupId, user.id],
+    await db.transaction(async (client) => {
+      // Lock the group row so concurrent admin adds cannot both pass the cap check.
+      await client.query("SELECT id FROM groups WHERE id = $1 FOR UPDATE", [groupId]);
+      const active = await client.query<{ user_id: string }>(
+        "SELECT user_id FROM group_members WHERE group_id = $1 AND removed_at IS NULL",
+        [groupId],
       );
-    }
+      const activeIds = new Set(active.rows.map((row) => row.user_id));
+      const additions = users.filter((user) => !activeIds.has(user.id));
+      if (activeIds.size + additions.length > 100) {
+        throw new HttpError(400, "GROUP_TOO_LARGE", "Groups support up to 100 members");
+      }
+      for (const user of additions) {
+        await client.query(
+          `INSERT INTO group_members (group_id, user_id, role)
+           VALUES ($1,$2,'member')
+           ON CONFLICT (group_id, user_id) DO UPDATE SET removed_at = NULL, role = 'member', joined_at = now()`,
+          [groupId, user.id],
+        );
+      }
+    });
     return reply.send({ group: await groupDetails(db, groupId) });
   });
 

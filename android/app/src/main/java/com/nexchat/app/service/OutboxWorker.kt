@@ -18,8 +18,14 @@ class OutboxWorker(context: Context, params: WorkerParameters) : CoroutineWorker
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val container = NexChatApp.from(applicationContext).container
         if (container.auth.state.value !is AuthState.LoggedIn) return@withContext Result.success()
-        runCatching { container.chat.onConnected() }
+        // Best-effort relay sync on both sides of the normal online flush.
+        // These runCatching calls never influence the worker result, which is
+        // still decided solely by the existing online flush.
+        runCatching { if (container.nearby.enabled.value) container.nearby.syncNow() }
+        val result = runCatching { container.chat.onConnected() }
             .fold(onSuccess = { Result.success() }, onFailure = { Result.retry() })
+        runCatching { if (container.nearby.enabled.value) container.nearby.syncNow() }
+        result
     }
 
     companion object {

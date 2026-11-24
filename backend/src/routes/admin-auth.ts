@@ -206,16 +206,6 @@ async function recordLockout(db: Database, admin: AdminRow): Promise<void> {
   );
 }
 
-async function invalidatePendingResets(db: Database, adminId: string): Promise<void> {
-  // A successful reset or password change invalidates every other outstanding
-  // one-time token for the same administrator.
-  await db.query(
-    `UPDATE admin_password_resets SET used_at = now()
-     WHERE admin_id = $1 AND used_at IS NULL`,
-    [adminId],
-  );
-}
-
 export async function registerAdminAuthRoutes(
   app: FastifyInstance,
   deps: Deps,
@@ -430,26 +420,32 @@ export async function registerAdminAuthRoutes(
       const passwordError = validatePassword(body.newPassword, 12);
       if (passwordError) throw new HttpError(400, "WEAK_PASSWORD", passwordError);
       const { hash, salt } = await hashPassword(body.newPassword);
-      const consumed = await db.one<{ id: string }>(
-        `UPDATE admin_password_resets SET used_at = now()
-         WHERE id = $1 AND used_at IS NULL RETURNING id`,
-        [row.reset_id],
-      );
-      if (!consumed) {
-        throw new HttpError(409, "RESET_TOKEN_USED", "This reset link was already used");
-      }
-      await db.query(
-        `UPDATE admin_users
-         SET password_hash = $1, password_salt = $2, failed_attempts = 0, locked_until = NULL
-         WHERE id = $3`,
-        [hash, salt, row.admin_id],
-      );
-      await db.query(
-        `UPDATE admin_sessions SET revoked_at = now()
-         WHERE admin_id = $1 AND revoked_at IS NULL`,
-        [row.admin_id],
-      );
-      await invalidatePendingResets(db, row.admin_id);
+      await db.transaction(async (client) => {
+        const consumed = await client.query<{ id: string }>(
+          `UPDATE admin_password_resets SET used_at = now()
+           WHERE id = $1 AND used_at IS NULL RETURNING id`,
+          [row.reset_id],
+        );
+        if (!consumed.rows[0]) {
+          throw new HttpError(409, "RESET_TOKEN_USED", "This reset link was already used");
+        }
+        await client.query(
+          `UPDATE admin_users
+           SET password_hash = $1, password_salt = $2, failed_attempts = 0, locked_until = NULL
+           WHERE id = $3`,
+          [hash, salt, row.admin_id],
+        );
+        await client.query(
+          `UPDATE admin_sessions SET revoked_at = now()
+           WHERE admin_id = $1 AND revoked_at IS NULL`,
+          [row.admin_id],
+        );
+        await client.query(
+          `UPDATE admin_password_resets SET used_at = now()
+           WHERE admin_id = $1 AND used_at IS NULL`,
+          [row.admin_id],
+        );
+      });
       await audit(db, row.admin_id, "admin.password_reset.completed", request, "admin", row.admin_id);
       return reply.send({ ok: true });
     },
@@ -490,17 +486,22 @@ export async function registerAdminAuthRoutes(
     const passwordError = validatePassword(body.newPassword, 12);
     if (passwordError) throw new HttpError(400, "WEAK_PASSWORD", passwordError);
     const { hash, salt } = await hashPassword(body.newPassword);
-    await db.query("UPDATE admin_users SET password_hash = $1, password_salt = $2 WHERE id = $3", [
-      hash,
-      salt,
-      context.admin.id,
-    ]);
-    await db.query(
-      `UPDATE admin_sessions SET revoked_at = now()
-       WHERE admin_id = $1 AND id <> $2 AND revoked_at IS NULL`,
-      [context.admin.id, context.sessionId],
-    );
-    await invalidatePendingResets(db, context.admin.id);
+    await db.transaction(async (client) => {
+      await client.query(
+        "UPDATE admin_users SET password_hash = $1, password_salt = $2 WHERE id = $3",
+        [hash, salt, context.admin.id],
+      );
+      await client.query(
+        `UPDATE admin_sessions SET revoked_at = now()
+         WHERE admin_id = $1 AND id <> $2 AND revoked_at IS NULL`,
+        [context.admin.id, context.sessionId],
+      );
+      await client.query(
+        `UPDATE admin_password_resets SET used_at = now()
+         WHERE admin_id = $1 AND used_at IS NULL`,
+        [context.admin.id],
+      );
+    });
     await audit(db, context.admin.id, "admin.password.changed", request, "admin", context.admin.id);
     return reply.send({ ok: true });
   });

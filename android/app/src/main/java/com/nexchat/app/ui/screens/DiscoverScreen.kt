@@ -1,5 +1,7 @@
 package com.nexchat.app.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -49,6 +51,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.nexchat.app.core.nearby.NearbyPeer
 import com.nexchat.app.net.ConnectionState
 import com.nexchat.app.ui.components.Avatar
 import com.nexchat.app.ui.components.GlassButton
@@ -68,14 +71,30 @@ fun DiscoverScreen(
     onOpenSettings: () -> Unit,
 ) {
     val palette = LocalNexPalette.current
-    val vm = nexViewModel(key = "discover") { DiscoverViewModel(it.api, it.auth, it.websocket, it.settings, it.chat) }
+    val vm = nexViewModel(key = "discover") {
+        DiscoverViewModel(it.api, it.auth, it.websocket, it.settings, it.chat, it.nearby)
+    }
     val profile by vm.profile.collectAsStateWithLifecycle()
     val connection by vm.connection.collectAsStateWithLifecycle()
     val reachable by vm.reachable.collectAsStateWithLifecycle()
     val checking by vm.checking.collectAsStateWithLifecycle()
+    val nearbyEnabled by vm.nearbyEnabled.collectAsStateWithLifecycle()
+    val nearbyPeers by vm.nearbyPeers.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
+
+    val nearbyPermissions = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) { results ->
+        if (results.isNotEmpty() && results.values.all { granted -> granted }) {
+            vm.enableNearby()
+        } else {
+            scope.launch {
+                snackbar.showSnackbar("Nearby needs the requested permissions to find local peers.")
+            }
+        }
+    }
 
     LaunchedEffect(Unit) {
         vm.messages.collect { snackbar.showSnackbar(it) }
@@ -267,12 +286,19 @@ fun DiscoverScreen(
             }
             item {
                 Spacer(Modifier.height(10.dp))
-                CapabilityCard(
-                    icon = Icons.Outlined.Bluetooth,
-                    title = "Nearby messaging",
-                    body = "Bluetooth LE offline delivery is not implemented in this build. No nearby permissions are requested.",
-                    state = "Not in this build",
-                    available = false,
+                NearbyMessagingCard(
+                    enabled = nearbyEnabled,
+                    peers = nearbyPeers,
+                    onEnable = {
+                        val required = vm.nearbyPermissions()
+                        if (required.isEmpty()) {
+                            vm.enableNearby()
+                        } else {
+                            nearbyPermissions.launch(required)
+                        }
+                    },
+                    onDisable = vm::disableNearby,
+                    onSync = vm::syncNearby,
                     modifier = Modifier.padding(horizontal = 18.dp),
                 )
             }
@@ -281,8 +307,8 @@ fun DiscoverScreen(
                 CapabilityCard(
                     icon = Icons.Outlined.Call,
                     title = "Encrypted calls",
-                    body = "One-to-one voice calls are end-to-end encrypted. Video calling is not available yet.",
-                    state = "Voice available",
+                    body = "One-to-one voice and video calls are end-to-end encrypted.",
+                    state = "Available",
                     available = true,
                     modifier = Modifier.padding(horizontal = 18.dp),
                 )
@@ -343,6 +369,122 @@ fun DiscoverScreen(
                 .padding(bottom = 92.dp, start = 16.dp, end = 16.dp),
         )
     }
+}
+
+@Composable
+private fun NearbyMessagingCard(
+    enabled: Boolean,
+    peers: List<NearbyPeer>,
+    onEnable: () -> Unit,
+    onDisable: () -> Unit,
+    onSync: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val palette = LocalNexPalette.current
+    GlassCard(
+        modifier = modifier,
+        corner = 22.dp,
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
+    ) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(palette.accentSoft),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Outlined.Bluetooth,
+                    contentDescription = null,
+                    tint = palette.accent,
+                    modifier = Modifier.size(21.dp),
+                )
+            }
+            Spacer(Modifier.width(13.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "Nearby messaging",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = palette.textPrimary,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                )
+                Text(
+                    "Bluetooth relay for peers in range, without a server round trip.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = palette.textSecondary,
+                    maxLines = 2,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                )
+            }
+            StatusPill(
+                if (enabled) "On" else "Off",
+                if (enabled) palette.success else palette.textMuted,
+            )
+        }
+        Spacer(Modifier.height(12.dp))
+        Text(
+            "${peers.size} nearby peer${if (peers.size == 1) "" else "s"} in range",
+            style = MaterialTheme.typography.labelMedium,
+            color = palette.textPrimary,
+            maxLines = 1,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+        )
+        Spacer(Modifier.height(4.dp))
+        if (peers.isEmpty()) {
+            Text(
+                "Enable nearby to discover peers. NEX IDs shown here are shortened for privacy.",
+                style = MaterialTheme.typography.bodySmall,
+                color = palette.textMuted,
+                maxLines = 2,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
+        } else {
+            peers.take(3).forEachIndexed { index, peer ->
+                Text(
+                    "Peer ${index + 1} · NEX ${redactNexId(peer.nexId)}",
+                    style = MaterialTheme.typography.bodySmall.atSize(11.sp),
+                    color = palette.textSecondary,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                )
+            }
+            if (peers.size > 3) {
+                Text(
+                    "+${peers.size - 3} more nearby peers",
+                    style = MaterialTheme.typography.bodySmall.atSize(11.sp),
+                    color = palette.textMuted,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                )
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            GlassButton(
+                text = if (enabled) "Stop nearby" else "Enable nearby",
+                icon = Icons.Outlined.Bluetooth,
+                modifier = Modifier.weight(1f),
+                onClick = if (enabled) onDisable else onEnable,
+            )
+            GlassButton(
+                text = "Sync now",
+                icon = Icons.Outlined.Sync,
+                modifier = Modifier.weight(1f),
+                enabled = enabled,
+                onClick = onSync,
+            )
+        }
+    }
+}
+
+/** Only the public NEX ID is displayed; Bluetooth addresses are never rendered. */
+private fun redactNexId(value: String): String {
+    val id = value.trim()
+    if (id.length <= 8) return "NEX ••••"
+    return "${id.take(4)}••••${id.takeLast(4)}"
 }
 
 @Composable

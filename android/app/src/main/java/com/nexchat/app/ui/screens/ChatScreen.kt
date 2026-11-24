@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -53,6 +54,7 @@ import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Download
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material.icons.outlined.InsertDriveFile
+import androidx.compose.material.icons.outlined.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Reply
@@ -73,6 +75,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -149,6 +152,34 @@ fun ChatScreen(
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
+
+    // The list uses reverseLayout, so index 0 is the newest message.
+    val listState = rememberLazyListState()
+    val nearLatest by remember { derivedStateOf { listState.firstVisibleItemIndex <= 2 } }
+    var lastSeenLatestId by remember(conversationId) { mutableStateOf<String?>(null) }
+    var lastSeenCount by remember(conversationId) { mutableStateOf(0) }
+    var newBelowCount by remember(conversationId) { mutableStateOf(0) }
+    val latestMessageId = if (paging.itemCount > 0) paging[0]?.id else null
+    val latestIsMine = if (paging.itemCount > 0) paging[0]?.outgoing == true else false
+
+    LaunchedEffect(latestMessageId) {
+        val latestId = latestMessageId ?: return@LaunchedEffect
+        val previousId = lastSeenLatestId
+        val added = (paging.itemCount - lastSeenCount).coerceAtLeast(0)
+        lastSeenLatestId = latestId
+        lastSeenCount = paging.itemCount
+        if (previousId == null || previousId == latestId) return@LaunchedEffect
+        if (nearLatest || latestIsMine) {
+            newBelowCount = 0
+            listState.animateScrollToItem(0)
+        } else {
+            newBelowCount += if (added > 0) added else 1
+        }
+    }
+    LaunchedEffect(nearLatest) {
+        if (nearLatest) newBelowCount = 0
+    }
+
     var showMenu by remember { mutableStateOf(false) }
     var selectedMessage by remember { mutableStateOf<MessageEntity?>(null) }
     var editTarget by remember { mutableStateOf<MessageEntity?>(null) }
@@ -406,6 +437,7 @@ fun ChatScreen(
                 } else {
                     LazyColumn(
                         modifier = Modifier.fillMaxSize(),
+                        state = listState,
                         reverseLayout = true,
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(
                             start = 14.dp,
@@ -436,6 +468,40 @@ fun ChatScreen(
                                     )
                                 }
                             }
+                        }
+                    }
+                }
+                if (paging.itemCount > 0 && newBelowCount > 0) {
+                    Box(
+                        Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(top = 8.dp)
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(palette.accent)
+                            .clickable {
+                                scope.launch {
+                                    listState.animateScrollToItem(0)
+                                    newBelowCount = 0
+                                }
+                            }
+                            .padding(horizontal = 14.dp, vertical = 7.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                Icons.Outlined.KeyboardArrowUp,
+                                contentDescription = null,
+                                tint = palette.onAccent,
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                "$newBelowCount new message${if (newBelowCount == 1) "" else "s"}",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = palette.onAccent,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                            )
                         }
                     }
                 }

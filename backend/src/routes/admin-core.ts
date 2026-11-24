@@ -29,18 +29,24 @@ function parseRange(value: unknown): RangeInfo {
       ? (value as RangeKey)
       : "30d";
   const days = RANGE_DAYS[key];
-  const now = Date.now();
+  // Align aggregates with the UTC calendar days used by admin charts.
+  const firstDay = daySeries(days)[0]!;
+  const start = new Date(`${firstDay}T00:00:00.000Z`);
   return {
     key,
     days,
-    start: new Date(now - days * 24 * 60 * 60 * 1000),
-    previousStart: new Date(now - 2 * days * 24 * 60 * 60 * 1000),
+    start,
+    previousStart: new Date(start.getTime() - days * 24 * 60 * 60 * 1000),
   };
 }
 
 function n(value: unknown): number {
   const parsed = Number(value ?? 0);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function likeContains(value: string): string {
+  return `%${value.replace(/[\\%_]/g, "\\$&")}%`;
 }
 
 function iso(value: unknown): string | null {
@@ -465,7 +471,7 @@ export async function registerAdminCoreRoutes(
         "u.deleted_at IS NULL AND u.suspended_at IS NULL AND u.banned_at IS NULL",
       );
     } else if (status === "suspended") {
-      conditions.push("u.deleted_at IS NULL AND u.suspended_at IS NOT NULL");
+      conditions.push("u.deleted_at IS NULL AND u.suspended_at IS NOT NULL AND u.banned_at IS NULL");
     } else if (status === "banned") {
       conditions.push("u.deleted_at IS NULL AND u.banned_at IS NOT NULL");
     } else if (status === "deleted") {
@@ -474,9 +480,9 @@ export async function registerAdminCoreRoutes(
       conditions.push("u.deleted_at IS NULL");
     }
     if (search) {
-      params.push(`${search}%`, `%${search}%`);
+      params.push(likeContains(search.toLowerCase()));
       conditions.push(
-        `(u.username LIKE $${params.length - 1} OR u.nex_id LIKE $${params.length - 1} OR u.display_name ILIKE $${params.length})`,
+        `(lower(u.username) LIKE $${params.length} ESCAPE '\\' OR lower(u.nex_id) LIKE $${params.length} ESCAPE '\\' OR lower(u.display_name) LIKE $${params.length} ESCAPE '\\')`,
       );
     }
     const where = conditions.join(" AND ");
@@ -496,7 +502,8 @@ export async function registerAdminCoreRoutes(
       `SELECT u.id, u.nex_id, u.username, u.display_name, u.created_at,
               u.suspended_at, u.suspended_reason, u.banned_at, u.banned_reason, u.deleted_at,
               count(d.id) FILTER (WHERE d.revoked_at IS NULL) AS device_count,
-              max(d.last_seen_at) AS last_seen_at, max(d.platform) AS platform
+              max(CASE WHEN d.revoked_at IS NULL THEN d.last_seen_at END) AS last_seen_at,
+              max(CASE WHEN d.revoked_at IS NULL THEN d.platform END) AS platform
        FROM users u LEFT JOIN devices d ON d.user_id = u.id
        WHERE ${where}
        GROUP BY u.id, u.nex_id, u.username, u.display_name, u.created_at,
@@ -652,6 +659,35 @@ export async function registerAdminCoreRoutes(
     return reply.send({ user: mapUser(updated ?? user) });
   });
 
+  app.delete("/v1/admin/users/:id/devices/:deviceId", async (request, reply) => {
+    const context = await requireAdmin(request, db, config, "users.write");
+    verifyCsrf(request, context, config);
+    const { id, deviceId } = request.params as { id: string; deviceId: string };
+    if (!/^[0-9a-f-]{36}$/i.test(deviceId)) {
+      throw new HttpError(400, "INVALID_DEVICE", "Invalid device identifier");
+    }
+    const device = await db.one<Record<string, unknown>>(
+      "SELECT id, name FROM devices WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL",
+      [deviceId, id],
+    );
+    if (!device) throw new HttpError(404, "DEVICE_NOT_FOUND", "Device not found");
+    await db.query("UPDATE devices SET revoked_at = now() WHERE id = $1", [deviceId]);
+    await db.query(
+      "UPDATE refresh_tokens SET revoked_at = now() WHERE device_id = $1 AND revoked_at IS NULL",
+      [deviceId],
+    );
+    await db.query("DELETE FROM one_time_prekeys WHERE device_id = $1", [deviceId]);
+    await db.query("DELETE FROM kyber_prekeys WHERE device_id = $1", [deviceId]);
+    await db.query("DELETE FROM envelopes WHERE recipient_device_id = $1", [deviceId]);
+    // An already-authenticated socket must not remain usable after revocation.
+    hub.closeDevice(deviceId, 4001, "device revoked by administrator");
+    await audit(db, context.admin.id, "user.device_revoked", request, "device", deviceId, {
+      userId: id,
+      name: device.name,
+    });
+    return reply.send({ ok: true });
+  });
+
   app.get("/v1/admin/calls", async (request, reply) => {
     await requireAdmin(request, db, config, "calls.read");
     const query = request.query as Record<string, unknown>;
@@ -782,8 +818,9 @@ export async function registerAdminCoreRoutes(
     const params: unknown[] = [range.start];
     let where = "l.created_at >= $1";
     if (action) {
-      params.push(`${action}%`);
-      where += ` AND l.action LIKE $${params.length}`;
+      params.push(action.trim().slice(0, 80));
+      // Literal prefix match: action names contain `_`, which is a LIKE wildcard.
+      where += ` AND starts_with(l.action, $${params.length})`;
     }
     const countRow = await db.one<{ count: unknown }>(
       `SELECT count(*) AS count FROM admin_audit_logs l WHERE ${where}`,
@@ -841,7 +878,7 @@ export async function registerAdminCoreRoutes(
     const context = await requireAdmin(request, db, config);
     const rows = await db.query<Record<string, unknown>>(
       `SELECT id, created_at, last_seen_at, expires_at, revoked_at, ip, user_agent
-       FROM admin_sessions WHERE admin_id = $1 ORDER BY created_at DESC LIMIT 25`,
+       FROM admin_sessions WHERE admin_id = $1 AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 25`,
       [context.admin.id],
     );
     return reply.send({
@@ -880,19 +917,51 @@ export async function registerAdminCoreRoutes(
         rowCount,
       });
     if (type === "users") {
+      const query = request.query as Record<string, unknown>;
+      const search = typeof query.q === "string" ? query.q.trim().toLowerCase().slice(0, 80) : "";
+      const status = typeof query.status === "string" ? query.status : "all";
+      const sortKey = typeof query.sort === "string" ? query.sort : "created_desc";
+      const conditions = ["u.created_at >= $1"];
+      const params: unknown[] = [range.start];
+      if (status === "active") {
+        conditions.push("u.deleted_at IS NULL AND u.suspended_at IS NULL AND u.banned_at IS NULL");
+      } else if (status === "suspended") {
+        conditions.push("u.deleted_at IS NULL AND u.suspended_at IS NOT NULL AND u.banned_at IS NULL");
+      } else if (status === "banned") {
+        conditions.push("u.deleted_at IS NULL AND u.banned_at IS NOT NULL");
+      } else if (status === "deleted") {
+        conditions.push("u.deleted_at IS NOT NULL");
+      } else {
+        conditions.push("u.deleted_at IS NULL");
+      }
+      if (search) {
+        params.push(likeContains(search));
+        conditions.push(
+          `(lower(u.username) LIKE $${params.length} ESCAPE '\\' OR lower(u.nex_id) LIKE $${params.length} ESCAPE '\\' OR lower(u.display_name) LIKE $${params.length} ESCAPE '\\')`,
+        );
+      }
+      const order =
+        sortKey === "created_asc"
+          ? "u.created_at ASC"
+          : sortKey === "last_seen_desc"
+            ? "d.last_seen_at DESC NULLS LAST"
+            : sortKey === "username_asc"
+              ? "u.username ASC"
+              : "u.created_at DESC";
       const rows = await db.query<Record<string, unknown>>(
         `SELECT u.nex_id, u.username, u.display_name, u.created_at, u.suspended_at,
-                u.deleted_at, d.last_seen_at, d.devices
+                u.banned_at, u.deleted_at, d.last_seen_at, d.devices
          FROM users u
          LEFT JOIN (
-           SELECT user_id, max(last_seen_at) AS last_seen_at,
+           SELECT user_id, max(CASE WHEN revoked_at IS NULL THEN last_seen_at END) AS last_seen_at,
                   count(*) FILTER (WHERE revoked_at IS NULL) AS devices
            FROM devices GROUP BY user_id
          ) d ON d.user_id = u.id
-         WHERE u.created_at >= $1 ORDER BY u.created_at DESC LIMIT 50000`,
-        [range.start],
+         WHERE ${conditions.join(" AND ")} ORDER BY ${order} LIMIT 50000`,
+        params,
       );
       await recordExport(rows.length);
+      reply.header("X-Export-Truncated", rows.length >= 50000 ? "true" : "false");
       sendCsv(
         reply,
         `nexchat-users-${range.key}.csv`,
@@ -910,15 +979,24 @@ export async function registerAdminCoreRoutes(
       return;
     }
     if (type === "calls") {
+      const query = request.query as Record<string, unknown>;
+      const status = typeof query.status === "string" ? query.status.trim().slice(0, 40) : "";
+      const conditions = ["c.started_at >= $1"];
+      const params: unknown[] = [range.start];
+      if (status) {
+        params.push(status);
+        conditions.push(`c.status = $${params.length}`);
+      }
       const rows = await db.query<Record<string, unknown>>(
         `SELECT c.*, cu.nex_id AS caller_nex_id, pu.nex_id AS callee_nex_id
          FROM call_sessions c
          LEFT JOIN users cu ON cu.id = c.caller_user_id
          LEFT JOIN users pu ON pu.id = c.callee_user_id
-         WHERE c.started_at >= $1 ORDER BY c.started_at DESC LIMIT 50000`,
-        [range.start],
+         WHERE ${conditions.join(" AND ")} ORDER BY c.started_at DESC LIMIT 50000`,
+        params,
       );
       await recordExport(rows.length);
+      reply.header("X-Export-Truncated", rows.length >= 50000 ? "true" : "false");
       sendCsv(
         reply,
         `nexchat-calls-${range.key}.csv`,
@@ -959,6 +1037,7 @@ export async function registerAdminCoreRoutes(
         [range.start],
       );
       await recordExport(rows.length);
+      reply.header("X-Export-Truncated", rows.length >= 50000 ? "true" : "false");
       sendCsv(
         reply,
         `nexchat-crashes-${range.key}.csv`,
@@ -975,13 +1054,23 @@ export async function registerAdminCoreRoutes(
     }
     if (type === "audit") {
       await requireAdmin(request, db, config, "audit.read");
+      const query = request.query as Record<string, unknown>;
+      const action = typeof query.action === "string" ? query.action.trim().slice(0, 80) : "";
+      const conditions = ["l.created_at >= $1"];
+      const params: unknown[] = [range.start];
+      if (action) {
+        params.push(action);
+        // Literal prefix match: action names contain `_`, which is a LIKE wildcard.
+        conditions.push(`starts_with(l.action, $${params.length})`);
+      }
       const rows = await db.query<Record<string, unknown>>(
         `SELECT l.created_at, a.username, l.action, l.target_type, l.target_id, l.ip
          FROM admin_audit_logs l LEFT JOIN admin_users a ON a.id = l.admin_id
-         WHERE l.created_at >= $1 ORDER BY l.created_at DESC LIMIT 50000`,
-        [range.start],
+         WHERE ${conditions.join(" AND ")} ORDER BY l.created_at DESC LIMIT 50000`,
+        params,
       );
       await recordExport(rows.length, "audit");
+      reply.header("X-Export-Truncated", rows.length >= 50000 ? "true" : "false");
       sendCsv(
         reply,
         `nexchat-audit-${range.key}.csv`,

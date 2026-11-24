@@ -87,76 +87,59 @@ class SignalCryptoManager(
         signalDeviceId: Int,
         bundle: KeyBundle? = null,
     ): EncryptedPayload = withContext(Dispatchers.IO) {
-        cryptoMutex.withLock {
-            store.initialize()
-            val protocolDeviceId = canonicalSignalDeviceId(signalDeviceId)
-            if (bundle != null && canonicalSignalDeviceId(bundle.signalDeviceId) != protocolDeviceId) {
-                throw CryptoException("Encryption bundle did not match the target device")
-            }
-            val address = SignalProtocolAddress(peerNexId, protocolDeviceId)
-            if (!store.containsSession(address)) {
-                val required = bundle ?: throw CryptoException("No prekey bundle available for $peerNexId")
-                val oneTimeKeyId = required.oneTimePreKeyId ?: PreKeyBundle.NULL_PRE_KEY_ID
-                val oneTimeKey = required.oneTimePreKeyPublic?.let { ECPublicKey(decode(it)) }
-                val preKeyBundle = PreKeyBundle(
-                    required.registrationId,
-                    protocolDeviceId,
-                    oneTimeKeyId,
-                    oneTimeKey,
-                    required.signedPreKeyId,
-                    ECPublicKey(decode(required.signedPreKeyPublic)),
-                    decode(required.signedPreKeySignature),
-                    IdentityKey(decode(required.identityKey)),
-                    required.kyberPreKeyId,
-                    KEMPublicKey(decode(required.kyberPreKeyPublic)),
-                    decode(required.kyberPreKeySignature),
-                )
-                try {
-                    SessionBuilder(store, address).process(preKeyBundle)
-                } catch (error: UntrustedIdentityException) {
-                    throw IdentityChangedException(peerNexId)
-                }
-            }
-            val cipher = SessionCipher(store, address)
-            val plaintext = json.encodeToString(content).toByteArray(Charsets.UTF_8)
-            val encrypted = cipher.encrypt(plaintext)
-            EncryptedPayload(
-                ciphertext = Base64.encodeToString(encrypted.serialize(), Base64.NO_WRAP),
-                cipherType = encrypted.type,
-            )
-        }
+        encryptContent(content, peerNexId, signalDeviceId, bundle)
+    }
+
+    /**
+     * Signal-encrypts an arbitrary UTF-8 string with the same pairwise session
+     * used for messages. Nearby routing headers use this so relays see only
+     * ciphertext, while the original end-to-end envelope stays untouched.
+     */
+    suspend fun encryptText(
+        text: String,
+        peerNexId: String,
+        signalDeviceId: Int,
+        bundle: KeyBundle? = null,
+    ): EncryptedPayload = withContext(Dispatchers.IO) {
+        encryptContent(SecureContent(kind = ContentKind.TEXT, text = text), peerNexId, signalDeviceId, bundle)
     }
 
     suspend fun decrypt(envelope: EnvelopeDto): SecureContent = withContext(Dispatchers.IO) {
+        decryptEnvelope(envelope)
+    }
+
+    /** Decrypts a Signal envelope produced by [encryptText]. */
+    suspend fun decryptText(envelope: EnvelopeDto): String = withContext(Dispatchers.IO) {
+        decryptEnvelope(envelope).text
+            ?: throw CryptoException("Encrypted payload did not contain text")
+    }
+
+    /**
+     * Fresh public key material for a nearby HELLO. One public one-time prekey
+     * is included so the peer can establish a new X3DH session; no private key
+     * ever leaves the store.
+     */
+    suspend fun nearbyKeyBundle(): KeyBundle = withContext(Dispatchers.IO) {
         cryptoMutex.withLock {
             store.initialize()
-            val address = SignalProtocolAddress(
-                envelope.senderNexId,
-                canonicalSignalDeviceId(envelope.senderSignalDeviceId),
+            val identity = store.ensureLocalDeviceIdentity()
+            val batch = store.pendingKeyMaterial()
+            val oneTime = batch.oneTimePreKeys.firstOrNull()
+                ?: throw CryptoException("No one-time Signal prekey available for nearby")
+            KeyBundle(
+                deviceId = identity.deviceId,
+                signalDeviceId = identity.signalDeviceId,
+                registrationId = identity.registrationId,
+                identityKey = store.identityPublicBase64(),
+                signedPreKeyId = batch.signedPreKeyId,
+                signedPreKeyPublic = batch.signedPreKeyPublic,
+                signedPreKeySignature = batch.signedPreKeySignature,
+                oneTimePreKeyId = oneTime.first,
+                oneTimePreKeyPublic = oneTime.second,
+                kyberPreKeyId = batch.kyberPreKeyId,
+                kyberPreKeyPublic = batch.kyberPreKeyPublic,
+                kyberPreKeySignature = batch.kyberPreKeySignature,
             )
-            val cipher = SessionCipher(store, address)
-            val bytes = Base64.decode(envelope.ciphertext, Base64.NO_WRAP)
-            val plaintext = try {
-                when (envelope.cipherType) {
-                    CiphertextMessage.PREKEY_TYPE -> cipher.decrypt(PreKeySignalMessage(bytes))
-                    CiphertextMessage.WHISPER_TYPE -> cipher.decrypt(SignalMessage(bytes))
-                    else -> throw CryptoException("Unsupported ciphertext type ${envelope.cipherType}")
-                }
-            } catch (error: DuplicateMessageException) {
-                throw DuplicateEnvelopeException()
-            } catch (error: ReusedBaseKeyException) {
-                throw DuplicateEnvelopeException()
-            } catch (error: UntrustedIdentityException) {
-                throw IdentityChangedException(envelope.senderNexId)
-            } catch (error: Exception) {
-                if (error is CryptoException) throw error
-                throw CryptoException("Message authentication or decryption failed", error)
-            }
-            try {
-                json.decodeFromString<SecureContent>(plaintext.toString(Charsets.UTF_8))
-            } catch (error: Exception) {
-                throw CryptoException("Decrypted content was malformed", error)
-            }
         }
     }
 
@@ -196,6 +179,81 @@ class SignalCryptoManager(
                 fingerprint.displayableFingerprint.displayText
             }.getOrNull()
         }
+
+    private suspend fun encryptContent(
+        content: SecureContent,
+        peerNexId: String,
+        signalDeviceId: Int,
+        bundle: KeyBundle?,
+    ): EncryptedPayload = cryptoMutex.withLock {
+        store.initialize()
+        val protocolDeviceId = canonicalSignalDeviceId(signalDeviceId)
+        if (bundle != null && canonicalSignalDeviceId(bundle.signalDeviceId) != protocolDeviceId) {
+            throw CryptoException("Encryption bundle did not match the target device")
+        }
+        val address = SignalProtocolAddress(peerNexId, protocolDeviceId)
+        if (!store.containsSession(address)) {
+            val required = bundle ?: throw CryptoException("No prekey bundle available for $peerNexId")
+            val oneTimeKeyId = required.oneTimePreKeyId ?: PreKeyBundle.NULL_PRE_KEY_ID
+            val oneTimeKey = required.oneTimePreKeyPublic?.let { ECPublicKey(decode(it)) }
+            val preKeyBundle = PreKeyBundle(
+                required.registrationId,
+                protocolDeviceId,
+                oneTimeKeyId,
+                oneTimeKey,
+                required.signedPreKeyId,
+                ECPublicKey(decode(required.signedPreKeyPublic)),
+                decode(required.signedPreKeySignature),
+                IdentityKey(decode(required.identityKey)),
+                required.kyberPreKeyId,
+                KEMPublicKey(decode(required.kyberPreKeyPublic)),
+                decode(required.kyberPreKeySignature),
+            )
+            try {
+                SessionBuilder(store, address).process(preKeyBundle)
+            } catch (error: UntrustedIdentityException) {
+                throw IdentityChangedException(peerNexId)
+            }
+        }
+        val cipher = SessionCipher(store, address)
+        val plaintext = json.encodeToString(content).toByteArray(Charsets.UTF_8)
+        val encrypted = cipher.encrypt(plaintext)
+        EncryptedPayload(
+            ciphertext = Base64.encodeToString(encrypted.serialize(), Base64.NO_WRAP),
+            cipherType = encrypted.type,
+        )
+    }
+
+    private suspend fun decryptEnvelope(envelope: EnvelopeDto): SecureContent = cryptoMutex.withLock {
+        store.initialize()
+        val address = SignalProtocolAddress(
+            envelope.senderNexId,
+            canonicalSignalDeviceId(envelope.senderSignalDeviceId),
+        )
+        val cipher = SessionCipher(store, address)
+        val bytes = Base64.decode(envelope.ciphertext, Base64.NO_WRAP)
+        val plaintext = try {
+            when (envelope.cipherType) {
+                CiphertextMessage.PREKEY_TYPE -> cipher.decrypt(PreKeySignalMessage(bytes))
+                CiphertextMessage.WHISPER_TYPE -> cipher.decrypt(SignalMessage(bytes))
+                else -> throw CryptoException("Unsupported ciphertext type ${envelope.cipherType}")
+            }
+        } catch (error: DuplicateMessageException) {
+            throw DuplicateEnvelopeException()
+        } catch (error: ReusedBaseKeyException) {
+            throw DuplicateEnvelopeException()
+        } catch (error: UntrustedIdentityException) {
+            throw IdentityChangedException(envelope.senderNexId)
+        } catch (error: Exception) {
+            if (error is CryptoException) throw error
+            throw CryptoException("Message authentication or decryption failed", error)
+        }
+        try {
+            json.decodeFromString<SecureContent>(plaintext.toString(Charsets.UTF_8))
+        } catch (error: Exception) {
+            throw CryptoException("Decrypted content was malformed", error)
+        }
+    }
 
     private fun decode(value: String): ByteArray = Base64.decode(value, Base64.NO_WRAP)
 }

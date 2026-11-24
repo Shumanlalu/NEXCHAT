@@ -25,6 +25,7 @@ import { registerAdminUiRoutes } from "./admin/ui";
 import { loadRemoteConfig } from "./admin/remote-config";
 import { TokenService } from "./security/tokens";
 import { WsHub } from "./ws/hub";
+import { createPostgresRateLimitStore } from "./rate-limit-store";
 
 export interface AppDependencies {
   config: AppConfig;
@@ -35,6 +36,11 @@ function parseVersion(value: string): [number, number, number] | null {
   const match = /^(\d+)\.(\d+)\.(\d+)/.exec(value.trim());
   if (!match) return null;
   return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+function versionFromUserAgent(value: string | undefined): string | null {
+  const match = /NEXCHAT-(?:Android|iOS)\/(\d+\.\d+\.\d+)/i.exec(value ?? "");
+  return match?.[1] ?? null;
 }
 
 function versionBelow(current: string, minimum: string): boolean {
@@ -115,10 +121,14 @@ export async function buildApp(
     allowedHeaders: ["Authorization", "Content-Type", "X-Request-Id"],
     maxAge: 600,
   });
+  const rateLimitWindowMs = 60_000;
   await app.register(rateLimit, {
     max: 240,
-    timeWindow: "1 minute",
+    timeWindow: rateLimitWindowMs,
     allowList: [],
+    store: createPostgresRateLimitStore(db, rateLimitWindowMs),
+    // A database outage must not turn into a total API outage.
+    skipOnError: true,
   });
   await app.register(websocket, {
     options: { maxPayload: 512 * 1024, perMessageDeflate: false },
@@ -187,7 +197,10 @@ export async function buildApp(
       );
     }
     const supplied = request.headers["x-app-version"];
-    const appVersion = Array.isArray(supplied) ? supplied[0] : supplied;
+    const agent = request.headers["user-agent"];
+    const appVersion =
+      (Array.isArray(supplied) ? supplied[0] : supplied) ??
+      versionFromUserAgent(Array.isArray(agent) ? agent[0] : agent);
     if (appVersion && versionBelow(appVersion, remote.minAppVersion)) {
       throw new HttpError(426, "APP_UPDATE_REQUIRED", "Please update NEXCHAT to continue");
     }

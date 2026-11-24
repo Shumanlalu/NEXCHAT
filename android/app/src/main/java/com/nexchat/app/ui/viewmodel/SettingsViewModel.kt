@@ -2,6 +2,7 @@ package com.nexchat.app.ui.viewmodel
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.nexchat.app.core.nearby.NearbyRelayManager
 import com.nexchat.app.core.network.ApiClient
 import com.nexchat.app.core.network.DeviceSummary
 import com.nexchat.app.core.settings.SettingsStore
@@ -141,12 +142,17 @@ class DiscoverViewModel(
     websocket: WebSocketManager,
     settings: SettingsStore,
     private val chat: ChatRepository,
+    private val nearby: NearbyRelayManager,
 ) : ViewModel() {
     val profile = auth.state
         .map { (it as? AuthState.LoggedIn)?.profile }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     val connection: StateFlow<ConnectionState> = websocket.state
+
+    /** Bluetooth nearby relay state; the UI never reads transport addresses. */
+    val nearbyEnabled: StateFlow<Boolean> = nearby.enabled
+    val nearbyPeers = nearby.peers
 
     val serverUrl: String = settings.state.value.serverUrl
 
@@ -178,4 +184,12 @@ class DiscoverViewModel(
             .onSuccess { _messages.tryEmit("Group list refreshed") }
             .onFailure { _messages.tryEmit(it.message ?: "Could not sync groups") }
     }
+
+    fun nearbyPermissions(): Array<String> = nearby.requiredPermissions()
+
+    fun enableNearby() = nearby.start()
+
+    fun disableNearby() = nearby.stop()
+
+    fun syncNearby() = nearby.syncNow()
 }

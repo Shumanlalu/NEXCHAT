@@ -153,6 +153,8 @@ class ChatRepository(
     private val crypto: SignalCryptoManager,
     private val settings: SettingsStore,
     private val metadataWatermarks: GroupMetadataWatermarkStore,
+    // Additive: existing online-only callers and tests keep compiling unchanged.
+    private val nearby: com.nexchat.app.core.nearby.NearbyRelayManager? = null,
 ) {
     private val profileDao = db.profileDao()
     private val contactDao = db.contactDao()
@@ -707,7 +709,10 @@ class ChatRepository(
     }
 
     suspend fun clearCallSignals(callId: String) = withContext(Dispatchers.IO) {
-        callOutboxDao.deleteForCall(callId)
+        // Terminal signals are deliberately preserved until their short TTL
+        // expires. A concurrent finishCall() must not delete a REJECT/HANGUP
+        // row before its detached sender has had a chance to flush it.
+        callOutboxDao.deleteForCallExceptTerminal(callId)
     }
 
     /**
@@ -862,6 +867,49 @@ class ChatRepository(
         } catch (error: CancellationException) {
             throw error
         } catch (error: Throwable) {
+            // Online delivery is always attempted first. Only a transient
+            // outage is eligible for nearby relay handoff: a permanent
+            // rejection or an expired session keeps the existing failure path.
+            if (!isPermanentDeliveryError(error) && error !is SessionExpiredException && nearby != null) {
+                val localNexId = profileDao.get()?.nexId
+                if (localNexId != null) {
+                    val accepted = try {
+                        nearby.enqueue(outgoing, localNexId)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Throwable) {
+                        emptyList()
+                    }
+                    if (accepted.isNotEmpty()) {
+                        val acceptedKeys = accepted.map {
+                            Triple(
+                                it.clientId,
+                                it.recipientNexId,
+                                canonicalSignalDeviceId(it.recipientSignalDeviceId),
+                            )
+                        }.toSet()
+                        for (row in pending) {
+                            val key = Triple(
+                                row.clientId,
+                                row.recipientNexId,
+                                canonicalSignalDeviceId(row.recipientSignalDeviceId),
+                            )
+                            if (key in acceptedKeys) outboxDao.delete(row.id)
+                        }
+                        cleanupMaterializedIntents()
+                        for (clientId in accepted.map { it.clientId }.distinct()) {
+                            // Acceptance is not delivery. Mark the bubble SENT
+                            // only once this client has no ciphertext queued.
+                            if (outboxDao.countForClient(clientId) == 0) {
+                                messageDao.markSent(clientId)
+                            }
+                        }
+                        // Intentionally no ChatEvent.Delivery here: only an
+                        // explicit receipt (online or nearby) may claim that.
+                        return true
+                    }
+                }
+            }
             if (isPermanentDeliveryError(error)) {
                 // The relay refused the payload itself (not an outage), so
                 // retrying the identical ciphertext can never succeed.
@@ -1248,14 +1296,14 @@ class ChatRepository(
             }
             ContentKind.REACTION -> {
                 if (envelopeGroupMatches(content, envelope)) {
-                    handleReaction(content, senderNexId, conversationIdFor(envelope))
+                    handleReaction(envelope, content, senderNexId)
                 }
             }
             ContentKind.READ -> {
-                if (settings.state.value.readReceipts) {
-                    val ids = content.readClientIds
-                    if (ids.isNotEmpty()) messageDao.markRead(ids, System.currentTimeMillis())
-                }
+                // The local setting controls whether we send receipts, not
+                // whether receipts about our own messages are applied.
+                val ids = content.readClientIds
+                if (ids.isNotEmpty()) messageDao.markRead(ids, System.currentTimeMillis())
             }
             ContentKind.TYPING -> {
                 val conversationId = conversationIdFor(envelope)
@@ -1275,7 +1323,11 @@ class ChatRepository(
                     handleIncomingAttachmentManifest(envelope, content, senderNexId)
                 }
             }
-            ContentKind.ATTACHMENT_CHUNK -> handleIncomingAttachmentChunk(content)
+            ContentKind.ATTACHMENT_CHUNK -> {
+                if (envelopeGroupMatches(content, envelope)) {
+                    handleIncomingAttachmentChunk(envelope, content, senderNexId)
+                }
+            }
             ContentKind.CALL_OFFER -> emitCallSignal(envelope, content) { cid, callId, sentAt ->
                 content.sdp?.let {
                     CallSignalEvent.Offer(
@@ -1537,18 +1589,36 @@ class ChatRepository(
         _events.tryEmit(ChatEvent.Incoming(IncomingMessageEvent(conversation, message)))
     }
 
-    private suspend fun handleIncomingAttachmentChunk(content: SecureContent) {
+    private suspend fun handleIncomingAttachmentChunk(
+        envelope: EnvelopeDto,
+        content: SecureContent,
+        senderNexId: String,
+    ) {
+        if (contactDao.get(senderNexId)?.blocked == true) return
         val id = content.attachmentId?.takeIf { it.isNotBlank() } ?: return
         val index = content.chunkIndex ?: return
         val encoded = content.chunkData ?: return
         val bytes = runCatching { Base64.decode(encoded, Base64.NO_WRAP) }.getOrNull() ?: return
         if (bytes.isEmpty() || bytes.size > ATTACHMENT_CHUNK_BYTES) return
-        val declaredCount = content.chunkCount ?: 1
+        val declaredCount = content.chunkCount ?: return
+        val maxChunks = (MAX_ATTACHMENT_BYTES + ATTACHMENT_CHUNK_BYTES - 1) / ATTACHMENT_CHUNK_BYTES
+        if (declaredCount <= 0 || declaredCount > maxChunks) return
         if (index < 0 || index >= declaredCount) return
+        val conversationId = conversationIdFor(envelope)
         val attachment = attachmentDao.get(id)
-        if (attachment != null && index >= attachment.chunkCount) return
-        // A chunk can arrive before its manifest on a different relay instance.
-        // Keep it in SQLCipher and let the manifest reconciliation finish it.
+        if (attachment != null) {
+            if (declaredCount != attachment.chunkCount || index >= attachment.chunkCount) return
+            val message = messageDao.get(id) ?: return
+            if (message.conversationId != conversationId) return
+        } else {
+            // A chunk can arrive before its manifest on a different relay
+            // instance. Buffer it, but bound both count and lifetime so an
+            // attacker cannot grow the local SQLCipher database indefinitely.
+            val now = System.currentTimeMillis()
+            attachmentDao.deleteOrphanChunksOlderThan(now - ATTACHMENT_BUFFER_TTL_MILLIS)
+            if (attachmentDao.chunkCount(id) >= declaredCount) return
+            if (attachmentDao.orphanChunkCount() >= MAX_BUFFERED_ATTACHMENT_CHUNKS) return
+        }
         attachmentDao.insertChunk(
             AttachmentChunkEntity(
                 attachmentId = id,
@@ -1654,12 +1724,18 @@ class ChatRepository(
         envelope.groupId?.let { "group:$it" } ?: "dm:${envelope.senderNexId}"
 
     private suspend fun handleReaction(
+        envelope: EnvelopeDto,
         content: SecureContent,
         senderNexId: String,
-        conversationId: String,
     ) {
         val target = content.targetClientId ?: return
         val emoji = content.emoji ?: return
+        val conversationId = conversationIdFor(envelope)
+        if (envelope.groupId != null &&
+            groupDao.getMembers(envelope.groupId).none { it.nexId == senderNexId }
+        ) {
+            return
+        }
         val existing = messageDao.get(target) ?: return
         if (existing.conversationId != conversationId) return
         val map = parseReactions(existing.reactionsJson).toMutableMap()
@@ -2069,12 +2145,16 @@ class ChatRepository(
     private suspend fun enqueueIntent(conversation: ConversationEntity, content: SecureContent) {
         val now = System.currentTimeMillis()
         val clientId = content.clientId ?: UUID.randomUUID().toString()
+        // The conversation row is the only authority for group routing. This
+        // closes the gap where group content was relayed as a DM and skipped
+        // server-side group membership checks.
+        val scoped = scopeContentToConversation(conversation, content)
         intentDao.upsert(
             PendingIntentEntity(
                 id = UUID.randomUUID().toString(),
                 clientId = clientId,
                 conversationId = conversation.id,
-                contentJson = json.encodeToString(SecureContent.serializer(), content),
+                contentJson = json.encodeToString(SecureContent.serializer(), scoped),
                 durable = true,
                 createdAt = now,
                 expiresAt = now + ttlFor(content.kind),
@@ -2087,18 +2167,19 @@ class ChatRepository(
         content: SecureContent,
         targets: List<Target>,
     ) {
+        val scoped = scopeContentToConversation(conversation, content)
         val messages = targets.mapNotNull { target ->
             runCatching {
-                val payload = crypto.encrypt(content, target.nexId, target.signalDeviceId, target.bundle)
+                val payload = crypto.encrypt(scoped, target.nexId, target.signalDeviceId, target.bundle)
                 OutgoingEnvelope(
                     recipientNexId = target.nexId,
                     recipientSignalDeviceId = target.signalDeviceId,
-                    clientId = content.clientId ?: UUID.randomUUID().toString(),
+                    clientId = scoped.clientId ?: UUID.randomUUID().toString(),
                     ciphertext = payload.ciphertext,
                     cipherType = payload.cipherType,
                     ephemeral = true,
                     expiresInSeconds = 120,
-                    groupId = content.groupId,
+                    groupId = scoped.groupId,
                 )
             }.getOrNull()
         }
@@ -2198,6 +2279,22 @@ class ChatRepository(
             _events.tryEmit(ChatEvent.Delivery(clientId))
         }
 
+    /** A nearby relay confirmed the recipient received this client's envelope. */
+    suspend fun markNearbyDelivered(clientId: String, at: Long) = withContext(Dispatchers.IO) {
+        messageDao.markDelivered(clientId, at)
+        _events.tryEmit(ChatEvent.Delivery(clientId))
+    }
+
+    /**
+     * The nearby relay could not finish delivery for now. Keep the status
+     * intact so a later success can still advance PENDING/SENT to DELIVERED.
+     */
+    suspend fun markNearbyFailed(clientId: String, message: String) = withContext(Dispatchers.IO) {
+        messageDao.setError(clientId, message)
+        val conversationId = messageDao.get(clientId)?.conversationId ?: clientId
+        _events.tryEmit(ChatEvent.Warning(conversationId, message))
+    }
+
     suspend fun markConversationArchived(id: String, archived: Boolean) =
         withContext(Dispatchers.IO) { conversationDao.setArchived(id, archived) }
 
@@ -2277,6 +2374,13 @@ class ChatRepository(
         AttachmentState.FAILED -> "📎 $fileName · transfer failed"
         else -> "📎 $fileName"
     }
+
+    private fun scopeContentToConversation(
+        conversation: ConversationEntity,
+        content: SecureContent,
+    ): SecureContent = content.copy(
+        groupId = if (conversation.type == "GROUP") conversation.groupId else null,
+    )
 
     private fun baseContent(kind: String, clientId: String, sender: SenderInfo): SecureContent =
         SecureContent(
@@ -2359,4 +2463,8 @@ private const val LONG_POLL_TIMEOUT_MILLIS = 20_000
 // stays safely below the relay's 131,072-byte ciphertext limit.
 private const val ATTACHMENT_CHUNK_BYTES = 90 * 1024
 const val MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+/** Pre-manifest chunks are buffered only long enough for a plausible relay delay. */
+const val ATTACHMENT_BUFFER_TTL_MILLIS = 10L * 60 * 1000
+/** Enough room for one maximum-size attachment plus relay overhead. */
+const val MAX_BUFFERED_ATTACHMENT_CHUNKS = 160
 private val SHA256_PATTERN = Regex("^[a-f0-9]{64}$")

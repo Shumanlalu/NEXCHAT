@@ -51,8 +51,8 @@ android {
         applicationId = "com.nexchat.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7
-        versionName = "1.0.6"
+        versionCode = 10
+        versionName = "1.0.9"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -208,6 +208,7 @@ dependencies {
     implementation("org.signal:libsignal-android:0.86.5")
     implementation("io.github.webrtc-sdk:android:125.6422.07")
     implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation("com.google.zxing:core:3.5.3")
     implementation("androidx.exifinterface:exifinterface:1.3.7")
 
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.3")

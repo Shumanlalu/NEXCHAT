@@ -1221,6 +1221,11 @@ class CallManager(
         ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
             PackageManager.PERMISSION_GRANTED
 
+    private fun isTurnServer(urls: List<String>): Boolean =
+        urls.any { url ->
+            url.startsWith("turn:", ignoreCase = true) || url.startsWith("turns:", ignoreCase = true)
+        }
+
     private suspend fun iceServers(): List<PeerConnection.IceServer> {
         val now = System.currentTimeMillis()
         synchronized(lock) {
@@ -1228,12 +1233,33 @@ class CallManager(
                 if (now - cachedAt < ICE_CACHE_MILLIS && servers.isNotEmpty()) return servers
             }
         }
-        val dtos = runCatching { api.serverConfig().iceServers }
+        val config = runCatching { api.serverConfig() }
             .onFailure { log("ice config fetch failed: ${it.message}") }
             .getOrNull()
+        var dtos = config?.iceServers
             ?.filter { it.urls.isNotEmpty() }
             ?.takeIf { it.isNotEmpty() }
             ?: listOf(IceServerDto(urls = listOf(DEFAULT_STUN)))
+        // Static credentials are never published by /v1/config. When the relay
+        // advertises a usable TURN deployment, mint short-lived credentials for
+        // this signed-in device before creating the peer connection.
+        if (config?.features?.turnConfigured == true && dtos.any { dto -> isTurnServer(dto.urls) }) {
+            val credentials = runCatching { api.turnCredentials() }
+                .onFailure { log("turn credentials fetch failed: ${it.message}") }
+                .getOrNull()
+            if (credentials?.available == true &&
+                credentials.username.isNotBlank() &&
+                credentials.credential.isNotBlank()
+            ) {
+                dtos = dtos.map { dto ->
+                    if (isTurnServer(dto.urls)) {
+                        dto.copy(username = credentials.username, credential = credentials.credential)
+                    } else {
+                        dto
+                    }
+                }
+            }
+        }
         val servers = dtos.mapNotNull { dto ->
             runCatching {
                 val builder = PeerConnection.IceServer.builder(dto.urls)

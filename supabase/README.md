@@ -11,7 +11,7 @@ moving ownership of the data to your Supabase project.
 
 | Item | State |
 | --- | --- |
-| SQL schema migration | Written, reviewed, **not applied to a Supabase project** |
+| SQL schema migrations | Core + admin/ops parity written, reviewed, **not applied to a Supabase project** |
 | RLS + privilege lockdown | Written; Data API access is deny-by-default |
 | Storage buckets and policies | Written, **not applied** |
 | Supabase project link | **Blocked**: no project reference or access token in this environment |
@@ -44,7 +44,10 @@ The script:
 1. Locates the working Supabase CLI binary.
 2. Verifies that you are logged in.
 3. Links this repository to your project.
-4. Pushes `supabase/migrations` to your project.
+4. Pushes both migrations in `supabase/migrations` to your project. The second
+   migration adds the admin/analytics/rate-limit tables that the relay otherwise
+   creates at startup; apply it before cutover so the Data API is locked down from
+   the first write.
 5. Prints the remote migration list.
 
 `supabase link` may ask for the project's **database password**. That password
@@ -80,6 +83,9 @@ Before switching production traffic:
 - RLS is enabled on every NEXCHAT table.
 - `anon` and `authenticated` have **no** privileges on message envelopes,
   prekeys, refresh tokens, delivery receipts, or password material.
+- Admin sessions, password resets, app settings, analytics, crash reports, and
+  rate-limit counters additionally deny `service_role`; only the relay's owner
+  connection reads or writes them.
 - The relay connects as the database owner, so it is unaffected by RLS; the
   Supabase Data API remains closed even if the anon key leaks.
 - `users.auth_user_id` and the self-read policies exist only to support a future

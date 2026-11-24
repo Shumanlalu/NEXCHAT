@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { FastifyInstance } from "fastify";
 import type { AppConfig } from "../config";
@@ -37,6 +37,15 @@ function publicIceServers(servers: unknown): Array<{ urls: unknown }> {
     if (!server || typeof server !== "object" || !("urls" in server)) return [];
     return [{ urls: (server as { urls: unknown }).urls }];
   });
+}
+
+function isTurnUrl(url: unknown): boolean {
+  return typeof url === "string" && /^turns?:/i.test(url);
+}
+
+function hasTurnUrl(server: Record<string, unknown>): boolean {
+  const urls = server.urls;
+  return (Array.isArray(urls) ? urls : [urls]).some(isTurnUrl);
 }
 
 export function envelopePayload(
@@ -504,14 +513,46 @@ export async function registerMessageRoutes(app: FastifyInstance, deps: Deps): P
     return reply.send({ ok: true });
   });
 
-  app.get("/v1/config", async (_request, reply) => {
-    const turnConfigured = config.iceServers.some((server) => {
-      const urls = (server as { urls?: unknown }).urls;
-      const list = Array.isArray(urls) ? urls : [urls];
-      return list.some(
-        (url) => typeof url === "string" && /^turns?:/i.test(url),
-      );
+  app.get("/v1/turn-credentials", {
+    config: { rateLimit: { max: 30, timeWindow: "1 minute" } },
+  }, async (request, reply) => {
+    const auth = await requireAuth(request, db, tokens);
+    const secret = config.turnSharedSecret;
+    const turnServers = config.iceServers.filter((server) => hasTurnUrl(server));
+    if (!secret || turnServers.length === 0) {
+      return reply.send({
+        available: false,
+        username: "",
+        credential: "",
+        expiresAt: null,
+        ttlSeconds: 0,
+        iceServers: [],
+      });
+    }
+    // coturn REST API: username = <user>:<unix-expiry>, credential =
+    // base64(HMAC-SHA1(shared secret, username)). The shared secret never
+    // leaves the server and each credential expires automatically.
+    const ttlSeconds = 3600;
+    const expiresAtUnix = Math.floor(Date.now() / 1000) + ttlSeconds;
+    const username = `${auth.user.id}:${expiresAtUnix}`;
+    const credential = createHmac("sha1", secret).update(username).digest("base64");
+    return reply.send({
+      available: true,
+      username,
+      credential,
+      expiresAt: new Date(expiresAtUnix * 1000).toISOString(),
+      ttlSeconds,
+      iceServers: turnServers.map((server) => ({
+        urls: server.urls,
+        username,
+        credential,
+      })),
     });
+  });
+
+  app.get("/v1/config", async (_request, reply) => {
+    const turnConfigured = Boolean(config.turnSharedSecret) &&
+      config.iceServers.some((server) => hasTurnUrl(server));
     const remote = await loadRemoteConfig(db);
     const announcement = await db
       .one<Record<string, unknown>>(
@@ -555,7 +596,7 @@ export async function registerMessageRoutes(app: FastifyInstance, deps: Deps): P
         features: {
           e2ee: "libsignal",
           groupEncryption: "pairwise-libsignal",
-          nearbyRelay: "unavailable",
+          nearbyRelay: "bluetooth-classic-device-local",
           audioCalls: remote.callsEnabled ? "webrtc-audio-1to1" : "disabled",
           videoCalls: remote.videoCallsEnabled ? "webrtc-video-1to1" : "disabled",
           pushNotifications: false,

@@ -1,5 +1,7 @@
 package com.nexchat.app.ui.screens
 
+import android.graphics.Bitmap
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -47,6 +49,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -55,6 +59,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.EncodeHintType
+import com.google.zxing.qrcode.QRCodeWriter
 import com.nexchat.app.data.SafetyNumber
 import com.nexchat.app.ui.components.Avatar
 import com.nexchat.app.ui.components.ConfirmDialog
@@ -217,9 +224,11 @@ fun ContactDetailScreen(
                         }
                         Spacer(Modifier.width(11.dp))
                         Text(
-                            "Compare these digits with ${contact?.displayName ?: "your contact"} in person or over a trusted channel. If they match, mark this device as verified.",
+                            "Compare these digits or scan the QR code with ${contact?.displayName ?: "your contact"} in person or over a trusted channel. Verification is manual: a changed safety number is never trusted automatically.",
                             style = MaterialTheme.typography.bodySmall,
                             color = palette.textSecondary,
+                            maxLines = 5,
+                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
                         )
                     }
                     Spacer(Modifier.height(14.dp))
@@ -243,6 +252,10 @@ fun ContactDetailScreen(
                             SafetyNumberCard(
                                 number = number,
                                 onToggle = { vm.setVerified(!number.verified) },
+                                onCopy = { value ->
+                                    clipboard.setText(AnnotatedString(value))
+                                    scope.launch { snackbar.showSnackbar("Safety number copied") }
+                                },
                             )
                         }
                     }
@@ -384,8 +397,14 @@ fun ContactDetailScreen(
 }
 
 @Composable
-private fun SafetyNumberCard(number: SafetyNumber, onToggle: () -> Unit) {
+private fun SafetyNumberCard(
+    number: SafetyNumber,
+    onToggle: () -> Unit,
+    onCopy: (String) -> Unit,
+) {
     val palette = LocalNexPalette.current
+    val formatted = formatFingerprint(number.fingerprint)
+    val digitsOnly = number.fingerprint.filter { it.isDigit() }
     Column(
         Modifier
             .fillMaxWidth()
@@ -399,6 +418,8 @@ private fun SafetyNumberCard(number: SafetyNumber, onToggle: () -> Unit) {
                 style = MaterialTheme.typography.labelMedium,
                 color = palette.textMuted,
                 modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
             )
             if (number.verified) {
                 Icon(
@@ -412,17 +433,43 @@ private fun SafetyNumberCard(number: SafetyNumber, onToggle: () -> Unit) {
                     "Verified",
                     style = MaterialTheme.typography.labelSmall.atSize(11.sp),
                     color = palette.success,
+                    maxLines = 1,
                 )
             }
+            Spacer(Modifier.width(6.dp))
+            GlassIconButton(
+                icon = Icons.Outlined.ContentCopy,
+                contentDescription = "Copy safety number",
+                onClick = { onCopy(formatted) },
+                size = 30.dp,
+                tint = palette.accent,
+            )
         }
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(10.dp))
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            SafetyQrCode(
+                value = digitsOnly,
+                modifier = Modifier.size(116.dp),
+            )
+            Spacer(Modifier.width(12.dp))
+            Text(
+                "Scan this code with your contact's device to compare the same number. Confirm the match yourself before marking it verified.",
+                style = MaterialTheme.typography.bodySmall,
+                color = palette.textSecondary,
+                modifier = Modifier.weight(1f),
+                maxLines = 5,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(Modifier.height(10.dp))
         Text(
-            formatFingerprint(number.fingerprint),
+            formatted,
             style = MaterialTheme.typography.bodyLarge.atSize(14.sp).copy(
                 fontFamily = FontFamily.Monospace,
                 letterSpacing = 0.1.sp,
             ),
             color = palette.textPrimary,
+            minLines = 1,
             maxLines = 4,
             overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
         )
@@ -436,6 +483,45 @@ private fun SafetyNumberCard(number: SafetyNumber, onToggle: () -> Unit) {
         }
     }
 }
+
+@Composable
+private fun SafetyQrCode(value: String, modifier: Modifier = Modifier) {
+    val bitmap = remember(value) { safetyQrBitmap(value) }
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap,
+            contentDescription = "QR code for this safety number",
+            modifier = modifier
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color.White),
+        )
+    } else {
+        Box(
+            modifier
+                .height(116.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color.White),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("QR unavailable", color = Color.Black, style = MaterialTheme.typography.labelSmall)
+        }
+    }
+}
+
+/** Encodes only the numeric safety number; identity keys are never encoded. */
+private fun safetyQrBitmap(value: String): ImageBitmap? = runCatching {
+    if (value.isBlank()) return@runCatching null
+    val size = 384
+    val hints = mapOf(
+        EncodeHintType.MARGIN to 2,
+        EncodeHintType.CHARACTER_SET to "UTF-8",
+    )
+    val matrix = QRCodeWriter().encode(value, BarcodeFormat.QR_CODE, size, size, hints)
+    val pixels = IntArray(size * size) { index ->
+        if (matrix[index % size, index / size]) android.graphics.Color.BLACK else android.graphics.Color.WHITE
+    }
+    Bitmap.createBitmap(pixels, size, size, Bitmap.Config.ARGB_8888).asImageBitmap()
+}.getOrNull()
 
 @Composable
 private fun DetailAction(

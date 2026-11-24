@@ -234,6 +234,9 @@ fun SettingsScreen(
                         "Choose how Nexchat looks. Your selection applies across every screen.",
                         style = MaterialTheme.typography.bodySmall,
                         color = palette.textSecondary,
+                        minLines = 1,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }
@@ -303,7 +306,10 @@ fun SettingsScreen(
                     Spacer(Modifier.height(8.dp))
                     AboutLine("Local storage", "SQLCipher · Android Keystore")
                     Spacer(Modifier.height(8.dp))
-                    AboutLine("Calls & nearby", "Voice and video calls available · nearby not included")
+                    AboutLine(
+                        "Calls & nearby",
+                        "Voice and video calls · Bluetooth nearby relay available",
+                    )
                     Spacer(Modifier.height(8.dp))
                     AboutLine("Attachments & transcription", "Encrypted files up to 10 MB · transcription not included")
                 }
@@ -515,12 +521,17 @@ private fun ToggleRow(
 @Composable
 private fun AboutLine(label: String, value: String) {
     val palette = LocalNexPalette.current
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.Top,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
         Text(
             label,
             style = MaterialTheme.typography.bodySmall,
             color = palette.textMuted,
-            modifier = Modifier.weight(0.38f),
+            modifier = Modifier.weight(0.35f),
+            minLines = 1,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )
@@ -528,7 +539,8 @@ private fun AboutLine(label: String, value: String) {
             value,
             style = MaterialTheme.typography.bodySmall,
             color = palette.textSecondary,
-            modifier = Modifier.weight(0.62f),
+            modifier = Modifier.weight(0.65f),
+            minLines = 1,
             maxLines = 3,
             overflow = TextOverflow.Ellipsis,
         )

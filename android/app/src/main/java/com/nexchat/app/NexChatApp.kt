@@ -18,6 +18,8 @@ import com.nexchat.app.core.crypto.NexSignalStore
 import com.nexchat.app.core.crypto.SignalCryptoManager
 import com.nexchat.app.core.db.DatabaseProvider
 import com.nexchat.app.core.db.NexDatabase
+import com.nexchat.app.core.nearby.NearbyDeliveryEvent
+import com.nexchat.app.core.nearby.NearbyRelayManager
 import com.nexchat.app.core.network.ApiClient
 import com.nexchat.app.core.network.NexJson
 import com.nexchat.app.core.security.SecureSessionStore
@@ -63,7 +65,21 @@ class AppContainer(val app: Application) {
             app.applicationContext.getSharedPreferences("nexchat_group_meta", Context.MODE_PRIVATE),
         )
     }
-    val chat: ChatRepository by lazy { ChatRepository(db, api, crypto, settings, groupMetadataWatermarks) }
+    // The relay is created only after the encrypted store/crypto exist. Its
+    // callbacks capture chat lazily, so construction cannot recurse into chat.
+    val nearby: NearbyRelayManager by lazy {
+        NearbyRelayManager(
+            app,
+            crypto,
+            db,
+            { envelope -> chat.receiveEnvelope(envelope, acknowledge = false) },
+            { clientId, at -> chat.markNearbyDelivered(clientId, at) },
+            { clientId, message -> chat.markNearbyFailed(clientId, message) },
+        )
+    }
+    val chat: ChatRepository by lazy {
+        ChatRepository(db, api, crypto, settings, groupMetadataWatermarks, nearby)
+    }
     val contacts: ContactRepository by lazy { ContactRepository(db, api, crypto) }
     val remoteConfig: RemoteConfigStore by lazy { RemoteConfigStore(app, api) }
     val telemetry: Telemetry by lazy { Telemetry(app, api, auth, scope) }
@@ -105,6 +121,9 @@ class AppContainer(val app: Application) {
                     api.resetSessionRevocation()
                     startMessagingService()
                     websocket.start()
+                    // Nearby permissions are optional: a denial must never
+                    // block the online connection or the rest of the session.
+                    runCatching { nearby.start() }
                     scope.launch { runCatching { remoteConfig.refresh() } }
                     // Repair one-time/Kyber key exhaustion after upgrades and
                     // reconnects so contacts can always fetch a usable bundle.
@@ -118,6 +137,21 @@ class AppContainer(val app: Application) {
                     runCatching { call.teardown() }
                     stopMessagingService()
                     websocket.stop()
+                    runCatching { nearby.stop() }
+                }
+            }
+        }
+        scope.launch {
+            nearby.events.collect { event ->
+                when (event) {
+                    is NearbyDeliveryEvent.Delivered -> {
+                        runCatching { chat.markNearbyDelivered(event.clientId, event.at) }
+                    }
+                    is NearbyDeliveryEvent.Failed -> {
+                        runCatching { chat.markNearbyFailed(event.clientId, event.message) }
+                    }
+                    // Hops are transport telemetry, not a user-visible event.
+                    is NearbyDeliveryEvent.Relayed -> Unit
                 }
             }
         }

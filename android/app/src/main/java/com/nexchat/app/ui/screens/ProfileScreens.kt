@@ -3,6 +3,7 @@ package com.nexchat.app.ui.screens
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -148,7 +149,7 @@ fun ProfileScreen(onBack: () -> Unit) {
                     GlassTextField(
                         value = displayName,
                         onValueChange = { displayName = it.take(40) },
-                        placeholder = "Display name",
+                        placeholder = "Your name",
                         label = "Display name",
                     )
                     Spacer(Modifier.height(12.dp))
@@ -171,41 +172,40 @@ fun ProfileScreen(onBack: () -> Unit) {
                         "NEX ID",
                         style = MaterialTheme.typography.labelSmall.atSize(11.sp).copy(letterSpacing = 0.4.sp),
                         color = palette.textMuted,
+                        maxLines = 1,
                     )
                     Spacer(Modifier.height(6.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            profile?.nexId ?: "—",
-                            style = MaterialTheme.typography.titleLarge,
-                            color = palette.textPrimary,
-                            maxLines = 1,
-                            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f),
-                        )
-                        Icon(
-                            Icons.Outlined.ContentCopy,
-                            contentDescription = "Copy NEX ID",
-                            tint = palette.accent,
-                            modifier = Modifier
-                                .size(22.dp)
-                                .clip(CircleShape)
-                                .background(palette.accentSoft)
-                                .padding(3.dp)
-                                .let { it },
-                        )
-                    }
-                    Spacer(Modifier.height(4.dp))
-                    TextButton(
-                        onClick = {
+                    Row(
+                        Modifier.clickable {
                             profile?.nexId?.let {
                                 clipboard.setText(AnnotatedString(it))
                                 scope.launch { snackbar.showSnackbar("NEX ID copied") }
                             }
                         },
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text("Copy NEX ID", color = palette.accent)
+                        Text(
+                            profile?.nexId ?: "—",
+                            style = MaterialTheme.typography.titleLarge,
+                            color = palette.textPrimary,
+                            maxLines = 1,
+                            minLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Icon(
+                            Icons.Outlined.ContentCopy,
+                            contentDescription = null,
+                            tint = palette.accent,
+                            modifier = Modifier
+                                .size(30.dp)
+                                .clip(CircleShape)
+                                .background(palette.accentSoft)
+                                .padding(5.dp),
+                        )
                     }
-                    Spacer(Modifier.height(4.dp))
+                    Spacer(Modifier.height(8.dp))
                     ProfileFact("Username", profile?.username?.let { "@$it" } ?: "—")
                     Spacer(Modifier.height(7.dp))
                     ProfileFact("Device ID", profile?.deviceId ?: "—")
@@ -317,19 +317,26 @@ fun ProfileScreen(onBack: () -> Unit) {
 @Composable
 private fun ProfileFact(label: String, value: String) {
     val palette = LocalNexPalette.current
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
         Text(
             label,
             style = MaterialTheme.typography.bodySmall,
             color = palette.textMuted,
             modifier = Modifier.weight(0.4f),
+            minLines = 1,
             maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
         )
         Text(
             value,
             style = MaterialTheme.typography.bodySmall,
             color = palette.textSecondary,
             modifier = Modifier.weight(0.6f),
+            minLines = 1,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )

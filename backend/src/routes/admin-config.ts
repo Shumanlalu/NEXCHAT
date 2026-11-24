@@ -276,20 +276,28 @@ export async function registerAdminConfigRoutes(
     const { hash, salt } = await hashPassword(body.password);
     const unusedSecret = generateTotpSecret();
     const id = randomUUID();
-    await db.query(
-      `INSERT INTO admin_users
-         (id, username, display_name, password_hash, password_salt, totp_secret_enc, role)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-      [
-        id,
-        body.email,
-        body.displayName,
-        hash,
-        salt,
-        encryptTotpSecret(unusedSecret, config),
-        body.role,
-      ],
-    );
+    try {
+      await db.query(
+        `INSERT INTO admin_users
+           (id, username, display_name, password_hash, password_salt, totp_secret_enc, role)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [
+          id,
+          body.email,
+          body.displayName,
+          hash,
+          salt,
+          encryptTotpSecret(unusedSecret, config),
+          body.role,
+        ],
+      );
+    } catch (error) {
+      // The pre-check above is not atomic; a concurrent create can still win.
+      if ((error as { code?: string }).code === "23505") {
+        throw new HttpError(409, "ADMIN_EXISTS", "That administrator already exists");
+      }
+      throw error;
+    }
     await audit(db, context.admin.id, "admin.created", request, "admin", id, {
       email: body.email,
       role: body.role,

@@ -1,4 +1,4 @@
-FROM node:22-alpine AS build
+FROM node:24-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm ci --ignore-scripts
@@ -6,7 +6,7 @@ COPY tsconfig.json ./
 COPY src ./src
 RUN npx tsc -p tsconfig.json && cp src/schema.sql dist/schema.sql
 
-FROM node:22-alpine
+FROM node:24-alpine
 RUN addgroup -S nexchat && adduser -S nexchat -G nexchat
 WORKDIR /app
 ENV NODE_ENV=production

@@ -20,19 +20,30 @@ export type RemoteConfig = z.infer<typeof remoteConfigSchema> & { version: numbe
 export const DEFAULT_REMOTE_CONFIG: RemoteConfig = {
   version: 1,
   callsEnabled: true,
-  videoCallsEnabled: true,
+  videoCallsEnabled: false,
   maxCallDurationSeconds: 3600,
   maintenanceMode: false,
   maintenanceMessage: "",
   minAppVersion: "1.0.0",
 };
 
+function parseConfigValue(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    // A manually corrupted settings row must not break public /v1/config or
+    // every authenticated request that passes through the policy hook.
+    return { ...DEFAULT_REMOTE_CONFIG };
+  }
+}
+
 export async function loadRemoteConfig(db: Database): Promise<RemoteConfig> {
   const row = await db.one<{ value: unknown; version: string | number }>(
     "SELECT value, version FROM app_settings WHERE key = 'remote_config'",
   );
   if (!row) return { ...DEFAULT_REMOTE_CONFIG };
-  const raw = typeof row.value === "string" ? JSON.parse(row.value) : row.value;
+  const raw = parseConfigValue(row.value);
   const parsed = remoteConfigSchema.safeParse(raw);
   if (!parsed.success) return { ...DEFAULT_REMOTE_CONFIG, version: Number(row.version) || 1 };
   return { ...parsed.data, version: Number(row.version) || 1 };
@@ -44,6 +55,15 @@ export async function saveRemoteConfig(
   adminId: string,
 ): Promise<RemoteConfig> {
   return db.transaction(async (client) => {
+    // A guard row exists even on the very first save, so FOR UPDATE has a row
+    // to lock and concurrent first writes serialize instead of both writing v1.
+    await client.query(
+      `INSERT INTO app_settings (key, value, version, updated_by)
+       VALUES ('remote_config_guard', '{}'::jsonb, 1, $1)
+       ON CONFLICT (key) DO NOTHING`,
+      [adminId],
+    );
+    await client.query("SELECT key FROM app_settings WHERE key = 'remote_config_guard' FOR UPDATE");
     const existing = await client.query<{ value: unknown; version: string | number }>(
       "SELECT value, version FROM app_settings WHERE key = 'remote_config' FOR UPDATE",
     );
@@ -82,12 +102,18 @@ export async function rollbackRemoteConfig(
     [historyId],
   );
   if (!row) throw Object.assign(new Error("history entry not found"), { statusCode: 404 });
-  const raw =
-    row.previous_value === null || row.previous_value === undefined
-      ? { ...DEFAULT_REMOTE_CONFIG }
-      : typeof row.previous_value === "string"
-        ? JSON.parse(row.previous_value)
-        : row.previous_value;
+  let raw: unknown;
+  if (typeof row.previous_value === "string") {
+    try {
+      raw = JSON.parse(row.previous_value);
+    } catch {
+      throw Object.assign(new Error("history entry is not a valid configuration"), {
+        statusCode: 409,
+      });
+    }
+  } else {
+    raw = row.previous_value ?? { ...DEFAULT_REMOTE_CONFIG };
+  }
   const parsed = remoteConfigSchema.safeParse(raw);
   if (!parsed.success) {
     throw Object.assign(new Error("history entry is not a valid configuration"), {

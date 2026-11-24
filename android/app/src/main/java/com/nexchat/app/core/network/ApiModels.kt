@@ -267,6 +267,16 @@ data class IceServerDto(
 )
 
 @Serializable
+data class TurnCredentialsResponse(
+    val available: Boolean = false,
+    val username: String = "",
+    val credential: String = "",
+    val expiresAt: String? = null,
+    val ttlSeconds: Int = 0,
+    val iceServers: List<IceServerDto> = emptyList(),
+)
+
+@Serializable
 data class ServerConfigResponse(
     val iceServers: List<IceServerDto> = emptyList(),
     val limits: LimitDto? = null,

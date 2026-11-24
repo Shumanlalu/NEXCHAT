@@ -21,6 +21,7 @@ const BOB_NEX_ID = "NX-EEBO-BOBE";
 const KEY = Buffer.from("hardening-test-key-material").toString("base64");
 const SETUP_TOKEN = "hardening-setup-token-for-tests";
 const ADMIN_PASSWORD = "HardeningAdmin-123";
+const TURN_SHARED_SECRET = "turn-shared-secret-for-tests";
 
 const config: AppConfig = {
   env: "test",
@@ -40,6 +41,7 @@ const config: AppConfig = {
     { urls: ["stun:stun.example.com:3478"] },
     { urls: "turn:turn.example.com:3478", username: "turn-user", credential: "turn-secret" },
   ],
+  turnSharedSecret: TURN_SHARED_SECRET,
   trustProxy: false,
   logLevel: "silent",
   adminSetupToken: SETUP_TOKEN,
@@ -159,7 +161,39 @@ describe("security hardening", () => {
       { urls: ["stun:stun.example.com:3478"] },
       { urls: "turn:turn.example.com:3478" },
     ]);
-    assert.doesNotMatch(response.body, /turn-user|turn-secret/);
+    assert.doesNotMatch(response.body, /turn-user|turn-secret|turn-shared-secret-for-tests/);
+  });
+
+  it("mints short-lived authenticated TURN credentials only for signed-in users", async () => {
+    const unauthenticated = await app.inject({
+      method: "GET",
+      url: "/v1/turn-credentials",
+    });
+    assert.equal(unauthenticated.statusCode, 401);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/turn-credentials",
+      headers: bearer(aliceToken),
+    });
+    assert.equal(response.statusCode, 200, response.body);
+    const body = response.json() as {
+      available: boolean;
+      username: string;
+      credential: string;
+      ttlSeconds: number;
+      expiresAt: string;
+      iceServers: Array<Record<string, unknown>>;
+    };
+    assert.equal(body.available, true);
+    assert.ok(body.username.startsWith(`${ALICE_USER}:`));
+    assert.ok(body.credential.length > 20);
+    assert.equal(body.ttlSeconds, 3600);
+    assert.ok(new Date(body.expiresAt).getTime() > Date.now());
+    assert.equal(body.iceServers.length, 1);
+    assert.equal(body.iceServers[0]?.username, body.username);
+    assert.equal(body.iceServers[0]?.credential, body.credential);
+    assert.doesNotMatch(response.body, /turn-shared-secret-for-tests/);
   });
 
   it("bans an account across API access and discovery, then allows unban", async () => {
@@ -193,6 +227,15 @@ describe("security hardening", () => {
       headers: bearer(bobToken),
     });
     assert.equal(profile.statusCode, 404);
+
+    const exported = await app.inject({
+      method: "GET",
+      url: "/v1/admin/reports/users/export.csv?range=30d&status=banned",
+      headers: adminHeaders(),
+    });
+    assert.equal(exported.statusCode, 200, exported.body);
+    assert.match(exported.body, new RegExp(`${ALICE_NEX_ID},[^\\r\\n]*,banned,`));
+    assert.doesNotMatch(exported.body, new RegExp(BOB_NEX_ID));
 
     const unbanned = await app.inject({
       method: "PATCH",
@@ -229,6 +272,19 @@ describe("security hardening", () => {
     });
     assert.equal(outdated.statusCode, 426);
     assert.equal((outdated.json() as { error: { code: string } }).error.code, "APP_UPDATE_REQUIRED");
+
+    // Real Android clients send their version in User-Agent, not x-app-version.
+    const outdatedAgent = await app.inject({
+      method: "GET",
+      url: "/v1/messages/pending",
+      headers: { ...bearer(aliceToken), "user-agent": "NEXCHAT-Android/1.1.9" },
+    });
+    assert.equal(outdatedAgent.statusCode, 426);
+    assert.equal(
+      (outdatedAgent.json() as { error: { code: string } }).error.code,
+      "APP_UPDATE_REQUIRED",
+    );
+
     const current = await app.inject({
       method: "GET",
       url: "/v1/messages/pending",

@@ -437,6 +437,13 @@ interface CallOutboxDao {
     @Query("DELETE FROM call_outbox WHERE callId = :callId")
     suspend fun deleteForCall(callId: String)
 
+    @Query(
+        """DELETE FROM call_outbox
+           WHERE callId = :callId
+             AND kind NOT IN ('CALL_HANGUP', 'CALL_REJECT')""",
+    )
+    suspend fun deleteForCallExceptTerminal(callId: String)
+
     @Query("DELETE FROM call_outbox WHERE expiresAt <= :now")
     suspend fun deleteExpired(now: Long)
 
@@ -529,6 +536,18 @@ interface AttachmentDao {
 
     @Query("SELECT COUNT(*) FROM attachment_chunks WHERE attachmentId = :id")
     suspend fun chunkCount(id: String): Int
+
+    @Query(
+        "SELECT COUNT(*) FROM attachment_chunks " +
+            "WHERE attachmentId NOT IN (SELECT id FROM attachments)",
+    )
+    suspend fun orphanChunkCount(): Int
+
+    @Query(
+        "DELETE FROM attachment_chunks " +
+            "WHERE createdAt < :before AND attachmentId NOT IN (SELECT id FROM attachments)",
+    )
+    suspend fun deleteOrphanChunksOlderThan(before: Long)
 
     @Query("SELECT * FROM attachment_chunks WHERE clientId = :clientId LIMIT 1")
     suspend fun chunkByClientId(clientId: String): AttachmentChunkEntity?

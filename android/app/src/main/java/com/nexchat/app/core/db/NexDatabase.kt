@@ -26,7 +26,7 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
         AttachmentEntity::class,
         AttachmentChunkEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = true,
 )
 abstract class NexDatabase : RoomDatabase() {
@@ -164,10 +164,18 @@ val MIGRATION_3_4 = object : Migration(3, 4) {
             "CREATE INDEX IF NOT EXISTS `index_attachment_chunks_clientId` " +
                 "ON `attachment_chunks` (`clientId`)",
         )
-        db.execSQL(
-            "CREATE INDEX IF NOT EXISTS `index_attachment_chunks_attachmentId` " +
-                "ON `attachment_chunks` (`attachmentId`)",
-        )
+    }
+}
+
+/**
+ * Repairs installations that already ran the first 3→4 schema. That migration
+ * created an extra attachmentId index which Room does not declare, so schema
+ * validation rejected it. Dropping it here makes both fresh and already
+ * migrated databases converge on the same expected schema.
+ */
+val MIGRATION_4_5 = object : Migration(4, 5) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("DROP INDEX IF EXISTS `index_attachment_chunks_attachmentId`")
     }
 }
 
@@ -185,7 +193,7 @@ object DatabaseProvider {
         val db = Room.databaseBuilder(context.applicationContext, NexDatabase::class.java, DATABASE_NAME)
             .openHelperFactory(factory)
             .setJournalMode(RoomDatabase.JournalMode.WRITE_AHEAD_LOGGING)
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
             .build()
         database = db
         return db

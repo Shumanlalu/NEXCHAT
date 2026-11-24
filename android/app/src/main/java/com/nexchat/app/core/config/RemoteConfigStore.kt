@@ -36,8 +36,9 @@ data class RemoteConfigState(
 
 /**
  * Caches the public /v1/config response so remote flags still apply during a
- * cold start with no network. Values start permissive; the server can only
- * narrow behaviour.
+ * cold start with no network. Startup defaults are fail-closed for video and
+ * use the last successfully fetched values for other flags; the server can
+ * narrow behaviour as soon as a refresh succeeds.
  */
 class RemoteConfigStore(
     context: Context,
@@ -179,7 +180,7 @@ class RemoteConfigStore(
     private data class CachedRemoteConfig(
         val version: Int = 0,
         val callsEnabled: Boolean = true,
-        val videoCallsEnabled: Boolean = true,
+        val videoCallsEnabled: Boolean = false,
         val maxCallDurationSeconds: Int = 3600,
         val maintenanceMode: Boolean = false,
         val maintenanceMessage: String = "",

@@ -22,15 +22,19 @@ class MessagingService : Service() {
         // sync and incoming-envelope fetch every few seconds while NEXCHAT is
         // running. WorkManager covers the process-killed case separately.
         container.websocket.start()
+        // Permission denial must be harmless: the online socket stays alive.
+        runCatching { container.nearby.start() }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         container.websocket.start()
+        runCatching { container.nearby.start() }
         return START_STICKY
     }
 
     override fun onDestroy() {
         container.websocket.stop()
+        runCatching { container.nearby.stop() }
         super.onDestroy()
     }
 

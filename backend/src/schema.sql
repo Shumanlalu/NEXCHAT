@@ -310,3 +310,12 @@ CREATE TABLE IF NOT EXISTS message_stats_daily (
     delivered BIGINT NOT NULL DEFAULT 0,
     skipped BIGINT NOT NULL DEFAULT 0
 );
+
+-- Shared rate-limit counters. A process-local store multiplies the configured
+-- limit by the number of serverless instances, so counters live in Postgres.
+CREATE TABLE IF NOT EXISTS rate_limit_counters (
+    key TEXT PRIMARY KEY,
+    current INTEGER NOT NULL,
+    expires_at BIGINT NOT NULL
+);
+

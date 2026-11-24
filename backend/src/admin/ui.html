@@ -224,6 +224,26 @@ function can(permission){
   const list = PERMS[state.admin && state.admin.role] || [];
   return list.includes('*') || list.includes(permission);
 }
+const ROUTE_PERMS = {
+  overview:'dashboard.read', users:'users.read', calls:'calls.read', monitoring:'monitoring.read',
+  config:'config.read', announcements:'config.read', audit:'audit.read', admins:'admins.manage', account:''
+};
+let sessionEpoch = 0;
+async function withBusy(button, work){
+  if (!button || button.dataset.busy === '1') return;
+  button.dataset.busy = '1';
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Working…';
+  try { return await work(); }
+  finally {
+    if (button.isConnected) {
+      button.disabled = false;
+      button.textContent = label;
+      delete button.dataset.busy;
+    }
+  }
+}
 const $ = (selector, root) => (root || document).querySelector(selector);
 const $$ = (selector, root) => Array.from((root || document).querySelectorAll(selector));
 function h(value){
@@ -352,7 +372,9 @@ async function api(path, options){
   let data = {};
   try { data = text ? JSON.parse(text) : {}; } catch (_) { data = { raw:text }; }
   if (response.status === 401 && !options.allow401) {
+    sessionEpoch += 1;
     state.admin = null; state.csrf = null;
+    closeModal();
     showLogin('Your session expired. Sign in again.');
     throw new Error('Session expired');
   }
@@ -447,9 +469,8 @@ async function boot(){
   }
 }
 function showLogin(message){
+  sessionEpoch += 1;
   state.admin = null; state.csrf = null; state.reset = null;
-  var rememberDefault = false;
-  try { rememberDefault = localStorage.getItem('nexchat_admin_remember') === 'true'; } catch (_) {}
   var sessionHours = state.boot && state.boot.sessionHours ? state.boot.sessionHours : 12;
   var rememberDays = state.boot && state.boot.rememberDays ? state.boot.rememberDays : 30;
   authShell('Welcome back', 'Sign in with your administrator email address and password.',
@@ -457,7 +478,7 @@ function showLogin(message){
     '<form id="login-form">' +
       '<label class="field"><span>Email address</span><input class="input" id="login-email" type="text" inputmode="email" autocomplete="username" required maxlength="254" placeholder="you@example.com"></label>' +
       passwordField('login-password', 'Password', { autocomplete:'current-password' }) +
-      '<label class="check auth-remember"><input type="checkbox" id="login-remember"' + (rememberDefault ? ' checked' : '') + '><span><b>Remember me</b><small>Keep this browser signed in for ' + h(rememberDays) + ' days.</small></span></label>' +
+      '<label class="check auth-remember"><input type="checkbox" id="login-remember"><span><b>Remember me</b><small>Keep this browser signed in for ' + h(rememberDays) + ' days.</small></span></label>' +
       '<div class="error-box" id="login-error" style="display:none"></div>' +
       '<button class="btn primary" id="login-submit" type="submit">Sign In</button>' +
     '</form>' +
@@ -481,7 +502,6 @@ function showLogin(message){
           remember: remember
         }
       });
-      try { localStorage.setItem('nexchat_admin_remember', String(remember)); } catch (_) {}
       state.admin = data.admin; state.csrf = data.csrfToken;
       location.hash = '#/overview';
       showApp();
@@ -645,6 +665,8 @@ async function renderRoute(){
   if (!state.admin) return;
   const route = (location.hash.replace('#/','').split('?')[0] || 'overview');
   if (!TITLES[route]) { location.hash = '#/overview'; return; }
+  if (ROUTE_PERMS[route] && !can(ROUTE_PERMS[route])) { location.hash = '#/overview'; return; }
+  const epoch = sessionEpoch;
   state.route = route;
   const meta = TITLES[route];
   shell(meta[0], meta[1], '<div class="page-loading"><span class="spinner"></span>Loading…</div>');
@@ -660,6 +682,7 @@ async function renderRoute(){
     else if (route === 'admins') await adminsView();
     else if (route === 'account') await accountView();
   } catch (error) {
+    if (epoch !== sessionEpoch) return;
     const main = $('#main');
     if (main) main.innerHTML = '<div class="error-box">' + h(error.message) + '</div>';
   }
@@ -797,12 +820,14 @@ function callModal(call){
 }
 async function usersView(){
   const main = $('#main');
+  const exportParams = new URLSearchParams({ range:state.range, status:state.userStatus, sort:state.userSort });
+  if (state.userQuery) exportParams.set('q', state.userQuery);
   main.innerHTML =
     '<div class="toolbar">' +
       '<input class="input" id="user-search" placeholder="Search username, display name or NEX ID" style="min-width:290px;flex:1" value="' + h(state.userQuery) + '">' +
       '<select id="user-status"><option value="active">Active</option><option value="suspended">Suspended</option><option value="banned">Banned</option><option value="deleted">Deleted</option><option value="all">All accounts</option></select>' +
       '<select id="user-sort"><option value="created_desc">Newest first</option><option value="last_seen_desc">Recently active</option><option value="username_asc">Username A–Z</option><option value="created_asc">Oldest first</option></select>' +
-      (can('reports.export') ? '<a class="btn ghost" href="/v1/admin/reports/users/export.csv?range=' + encodeURIComponent(state.range) + '">Export CSV</a>' : '') +
+      (can('reports.export') ? '<a class="btn ghost" href="/v1/admin/reports/users/export.csv?' + exportParams.toString() + '">Export CSV</a><span class="tiny">Exports cap at 50,000 rows; the response marks truncation.</span>' : '') +
     '</div>' +
     '<section class="panel"><div id="users-table"><div class="page-loading"><span class="spinner"></span>Loading users…</div></div></section>';
   $('#user-status').value = state.userStatus;
@@ -821,17 +846,17 @@ async function loadUsers(page){
     const params = new URLSearchParams({ page:String(page), pageSize:'25', status:state.userStatus, sort:state.userSort });
     if (state.userQuery) params.set('q', state.userQuery);
     const data = await api('/v1/admin/users?' + params.toString());
-    if (!data.users.length) {
-      target.innerHTML = '<div class="empty">No accounts match this filter.</div>';
-      return;
-    }
-    target.innerHTML = '<div class="table-wrap"><table><thead><tr><th>Account</th><th>NEX ID</th><th>Status</th><th>Devices</th><th>Last active</th><th>Registered</th><th></th></tr></thead><tbody>' +
-      data.users.map(user =>
-        '<tr data-user="' + h(user.id) + '"><td><div class="name">' + h(user.displayName || user.username) + '</div><div class="tiny">@' + h(user.username) + '</div></td>' +
-        '<td class="mono">' + h(user.nexId) + '</td><td>' + statusPill(user.status) + '</td>' +
-        '<td>' + fmtNum(user.deviceCount) + '</td><td>' + h(fmtAt(user.lastSeenAt)) + '</td><td>' + h(fmtAt(user.createdAt)) + '</td>' +
-        '<td><button class="btn small ghost" data-user-open="' + h(user.id) + '">Open</button></td></tr>'
-      ).join('') + '</tbody></table></div>' +
+    if (data.page > data.pages) { await loadUsers(data.pages); return; }
+    const body = data.users.length
+      ? '<div class="table-wrap"><table><thead><tr><th>Account</th><th>NEX ID</th><th>Status</th><th>Devices</th><th>Last active</th><th>Registered</th><th></th></tr></thead><tbody>' +
+        data.users.map(user =>
+          '<tr data-user="' + h(user.id) + '"><td><div class="name">' + h(user.displayName || user.username) + '</div><div class="tiny">@' + h(user.username) + '</div></td>' +
+          '<td class="mono">' + h(user.nexId) + '</td><td>' + statusPill(user.status) + '</td>' +
+          '<td>' + fmtNum(user.deviceCount) + '</td><td>' + h(fmtAt(user.lastSeenAt)) + '</td><td>' + h(fmtAt(user.createdAt)) + '</td>' +
+          '<td><button class="btn small ghost" data-user-open="' + h(user.id) + '">Open</button></td></tr>'
+        ).join('') + '</tbody></table></div>'
+      : '<div class="empty">No accounts match this filter.</div>';
+    target.innerHTML = body +
       '<div class="pager"><span>Page ' + data.page + ' of ' + data.pages + ' · ' + fmtNum(data.total) + ' accounts</span><span class="row">' +
       '<button class="btn small" data-page="' + (data.page-1) + '" ' + (data.page <= 1 ? 'disabled' : '') + '>Previous</button>' +
       '<button class="btn small" data-page="' + (data.page+1) + '" ' + (data.page >= data.pages ? 'disabled' : '') + '>Next</button></span></div>';
@@ -843,6 +868,7 @@ async function loadUsers(page){
   }
 }
 async function openUser(id){
+  const epoch = sessionEpoch;
   openModal('<div class="page-loading"><span class="spinner"></span>Loading account…</div>');
   try {
     const data = await api('/v1/admin/users/' + encodeURIComponent(id));
@@ -867,41 +893,62 @@ async function openUser(id){
       : '';
     $('#modal-root').innerHTML = '<div class="modal-backdrop"><div class="modal"><div class="modal-head"><div><h3>' + h(user.displayName || user.username) + '</h3><div class="tiny">@' + h(user.username) + ' · <span class="mono">' + h(user.nexId) + '</span></div></div><button class="icon-btn close" data-close>×</button></div>' +
       '<div class="grid cards" style="margin-bottom:14px">' + card('Status', statusPill(user.status), '') + card('Devices', fmtNum(data.counts ? user.deviceCount : 0), 'registered') + card('Messages (retained)', fmtNum(data.counts.sent + data.counts.received), fmtNum(data.counts.sent) + ' sent') + card('Calls', fmtNum(data.counts.calls), fmtNum(data.counts.crashes) + ' crashes') + '</div>' +
-      '<h3 style="margin-top:16px">Devices</h3><div class="table-wrap"><table><thead><tr><th>Name</th><th>Platform</th><th>Signal ID</th><th>Last seen</th></tr></thead><tbody>' +
-      data.devices.map(device => '<tr><td>' + h(device.name) + '</td><td>' + h(device.platform) + '</td><td>' + fmtNum(device.signalDeviceId) + '</td><td>' + h(fmtAt(device.lastSeenAt)) + '</td></tr>').join('') +
+      '<h3 style="margin-top:16px">Devices</h3><div class="table-wrap"><table><thead><tr><th>Name</th><th>Platform</th><th>Signal ID</th><th>Last seen</th><th></th></tr></thead><tbody>' +
+      data.devices.map(device => '<tr><td>' + h(device.name) + '</td><td>' + h(device.platform) + '</td><td>' + fmtNum(device.signalDeviceId) + '</td><td>' + h(fmtAt(device.lastSeenAt)) + '</td><td>' +
+        (device.revokedAt ? '<span class="pill">revoked</span>' : (can('users.write') ? '<button class="btn small danger" data-device-revoke="' + h(device.id) + '" data-device-name="' + h(device.name) + '">Revoke</button>' : '')) + '</td></tr>').join('') +
       '</tbody></table></div>' +
       '<h3 style="margin-top:16px">Recent calls</h3>' + (data.calls.length ? callsTable(data.calls) : '<div class="empty">No calls recorded.</div>') +
       '<h3 style="margin-top:16px">Recent crashes</h3>' + (data.crashes.length ? '<div class="stack">' + data.crashes.map(crash => '<div class="notice"><b>' + h(crash.appVersion || 'unknown version') + '</b> · ' + h(fmtAt(crash.createdAt)) + '<br>' + h(crash.message) + '</div>').join('') + '</div>' : '<div class="empty">No crashes recorded.</div>') +
       actions + '</div></div>';
     bindModalClose();
+    bindCallRows();
     $$('[data-user-action]').forEach(button => button.addEventListener('click', () => userAction(user, button.dataset.userAction)));
+    $$('[data-device-revoke]', $('#modal-root')).forEach(button => button.addEventListener('click', async () => {
+      if (!window.confirm('Revoke ' + (button.dataset.deviceName || 'this device') + '? Its sessions and queued messages will be removed.')) return;
+      await withBusy(button, async () => {
+        try {
+          await api('/v1/admin/users/' + encodeURIComponent(user.id) + '/devices/' + encodeURIComponent(button.dataset.deviceRevoke), { method:'DELETE' });
+          toast('Device revoked', 'ok'); await openUser(user.id);
+        } catch (error) { toast(error.message, 'bad'); }
+      });
+    }));
   } catch (error) {
+    if (epoch !== sessionEpoch) return;
     $('#modal-root').innerHTML = '<div class="modal-backdrop"><div class="modal"><div class="error-box">' + h(error.message) + '</div><button class="btn" data-close>Close</button></div></div>';
     bindModalClose();
   }
 }
 function userAction(user, action){
   const labels = { suspend:'Suspend', ban:'Ban', restore:'Reactivate', unban:'Lift ban', delete:'Soft-delete' };
+  const liftNotice = action === 'restore'
+    ? '<div class="notice">Reactivation clears suspension and soft-deletion. An existing ban is preserved.</div>'
+    : '<div class="notice">Lifting a ban preserves any suspension or soft-deletion.</div>';
   $('#modal-root').innerHTML = '<div class="modal-backdrop"><div class="modal"><div class="modal-head"><div><h3>' + labels[action] + ' ' + h(user.username) + '</h3><p class="hint">This action is written to the audit log.</p></div><button class="icon-btn close" data-close>×</button></div>' +
-    (action === 'suspend' || action === 'ban' || action === 'delete' ? '<label class="field"><span>Reason (optional, shown to the operator)</span><textarea id="action-reason" maxlength="300"></textarea></label>' : '<div class="notice">The account will be able to sign in again and keep its existing encryption identity.</div>') +
+    (action === 'suspend' || action === 'ban' || action === 'delete' ? '<label class="field"><span>Reason (optional, shown to the operator)</span><textarea id="action-reason" maxlength="300"></textarea></label>' : liftNotice) +
     '<div class="row end"><button class="btn" data-close>Cancel</button><button class="btn ' + (action === 'restore' || action === 'unban' ? 'primary' : 'danger') + '" id="action-confirm">' + labels[action] + '</button></div></div></div>';
   bindModalClose();
   $('#action-confirm').addEventListener('click', async () => {
-    try {
-      await api('/v1/admin/users/' + encodeURIComponent(user.id), { method:'PATCH', body:{ action, reason: $('#action-reason') ? $('#action-reason').value.trim() : undefined } });
-      toast('Account updated', 'ok'); closeModal(); await loadUsers(state.userPage);
-    } catch (error) { toast(error.message, 'bad'); }
+    const button = $('#action-confirm');
+    await withBusy(button, async () => {
+      try {
+        const result = await api('/v1/admin/users/' + encodeURIComponent(user.id), { method:'PATCH', body:{ action, reason: $('#action-reason') ? $('#action-reason').value.trim() : undefined } });
+        toast('Account updated · status: ' + (result.user && result.user.status ? result.user.status : 'changed'), 'ok');
+        closeModal(); await loadUsers(state.userPage);
+      } catch (error) { toast(error.message, 'bad'); }
+    });
   });
 }
 async function callsView(){
   const main = $('#main');
+  const exportParams = new URLSearchParams({ range:state.range });
+  if (state.callsStatus) exportParams.set('status', state.callsStatus);
   main.innerHTML = '<div class="toolbar"><select id="call-status"><option value="">All statuses</option><option value="ringing">Ringing</option><option value="connected">Connected</option><option value="ended">Ended</option><option value="declined">Declined</option><option value="missed">Missed</option><option value="failed">Failed</option></select>' +
-    (can('reports.export') ? '<a class="btn ghost" href="/v1/admin/reports/calls/export.csv?range=' + encodeURIComponent(state.range) + '">Export CSV</a>' : '') +
+    (can('reports.export') ? '<a class="btn ghost" href="/v1/admin/reports/calls/export.csv?' + exportParams.toString() + '">Export CSV</a><span class="tiny">Exports cap at 50,000 rows; the response marks truncation.</span>' : '') +
     '<span class="grow"></span><span class="tiny">Telemetry is reported by NEXCHAT 1.0.5 and later. No audio or video content is collected.</span></div>' +
     '<section class="panel"><div id="calls-table"><div class="page-loading"><span class="spinner"></span>Loading calls…</div></div></section>';
   $('#call-status').value = state.callsStatus;
   $('#call-status').addEventListener('change', event => { state.callsStatus = event.target.value; state.callsPage = 1; loadCalls(1); });
-  await loadCalls(1);
+  await loadCalls(state.callsPage);
 }
 async function loadCalls(page){
   state.callsPage = page;
@@ -954,7 +1001,7 @@ async function configView(){
   const editable = can('config.write');
   const main = $('#main');
   main.innerHTML =
-    '<div class="notice">Settings here are returned by <span class="mono">GET /v1/config</span> and cached by Android for 30 seconds. Feature flags affect NEXCHAT 1.0.5 and later; older APKs ignore them.</div>' +
+    '<div class="notice">Settings here are returned by <span class="mono">GET /v1/config</span>. Android refreshes them about every 5 minutes and on cold start when online. Server-side policy checks apply immediately to requests; older APKs without these flags still obey maintenance, version and call limits.</div>' +
     '<div class="grid two">' +
       '<section class="panel"><h2>Remote settings</h2><p class="hint">Current version: ' + fmtNum(config.version) + '</p>' +
         '<form id="config-form">' +
@@ -990,18 +1037,24 @@ async function configView(){
         minAppVersion: $('#cfg-min-version').value.trim()
       };
       if (!/^\d+\.\d+\.\d+$/.test(payload.minAppVersion)) return toast('Minimum version must look like 1.2.3', 'bad');
-      if (!Number.isFinite(payload.maxCallDurationSeconds) || payload.maxCallDurationSeconds < 60) return toast('Maximum call duration must be at least 60 seconds', 'bad');
-      try {
-        await api('/v1/admin/config', { method:'PATCH', body:payload });
-        toast('Configuration published', 'ok'); await configView();
-      } catch (error) { toast(error.message, 'bad'); }
+      if (!Number.isFinite(payload.maxCallDurationSeconds) || payload.maxCallDurationSeconds < 60 || payload.maxCallDurationSeconds > 14400) return toast('Maximum call duration must be between 60 and 14400 seconds', 'bad');
+      await withBusy($('#cfg-save'), async () => {
+        try {
+          await api('/v1/admin/config', { method:'PATCH', body:payload });
+          toast('Configuration published', 'ok'); await configView();
+        } catch (error) { toast(error.message, 'bad'); }
+      });
     });
     $$('[data-rollback]').forEach(button => button.addEventListener('click', async () => {
-      if (!window.confirm('Restore the configuration that preceded version entry ' + button.dataset.rollback + '?')) return;
-      try {
-        await api('/v1/admin/config/rollback/' + encodeURIComponent(button.dataset.rollback), { method:'POST' });
-        toast('Configuration restored', 'ok'); await configView();
-      } catch (error) { toast(error.message, 'bad'); }
+      const entry = data.history.find(item => item.id === button.dataset.rollback);
+      const label = entry ? 'v' + fmtNum(entry.version) + ' (' + fmtAt(entry.createdAt) + ')' : 'this history entry';
+      if (!window.confirm('Restore the configuration that preceded ' + label + '?')) return;
+      await withBusy(button, async () => {
+        try {
+          await api('/v1/admin/config/rollback/' + encodeURIComponent(button.dataset.rollback), { method:'POST' });
+          toast('Configuration restored', 'ok'); await configView();
+        } catch (error) { toast(error.message, 'bad'); }
+      });
     }));
   }
 }
@@ -1017,7 +1070,7 @@ async function announcementsView(){
         '<label class="field"><span>Message</span><textarea id="ann-body" maxlength="2000" required ' + (!writable ? 'disabled' : '') + '>' + h(edit ? edit.body : '') + '</textarea></label>' +
         '<div class="row"><label class="field" style="flex:1"><span>Severity</span><select id="ann-severity" ' + (!writable ? 'disabled' : '') + '><option value="info">Information</option><option value="warning">Warning</option><option value="critical">Critical</option></select></label>' +
         '<label class="field" style="flex:1"><span>Ends at (optional)</span><input class="input" id="ann-ends" type="datetime-local" ' + (!writable ? 'disabled' : '') + '></label></div>' +
-        '<label class="check"><input type="checkbox" id="ann-active" checked ' + (!writable ? 'disabled' : '') + '><span><b>Active</b><small>Only active announcements are delivered to clients.</small></span></label>' +
+        '<label class="check"><input type="checkbox" id="ann-active"' + (!edit || edit.active ? ' checked' : '') + ' ' + (!writable ? 'disabled' : '') + '><span><b>Active</b><small>Only active announcements are delivered to clients.</small></span></label>' +
         '<div class="row">' + (writable ? '<button class="btn primary" type="submit">' + (edit ? 'Save changes' : 'Publish announcement') + '</button>' : '') + (edit ? '<button class="btn" type="button" id="ann-cancel">Cancel</button>' : '') + '</div>' +
       '</form></section>' +
       '<section class="panel"><h2>Published announcements</h2><p class="hint">' + fmtNum(data.announcements.length) + ' total</p>' +
@@ -1039,19 +1092,26 @@ async function announcementsView(){
         severity: $('#ann-severity').value, active: $('#ann-active').checked,
         endsAt: $('#ann-ends').value ? new Date($('#ann-ends').value).toISOString() : null
       };
-      try {
-        if (edit) await api('/v1/admin/announcements/' + encodeURIComponent(edit.id), { method:'PATCH', body:payload });
-        else await api('/v1/admin/announcements', { method:'POST', body:payload });
-        state.editingAnnouncement = null; toast('Announcement saved', 'ok'); await announcementsView();
-      } catch (error) { toast(error.message, 'bad'); }
+      await withBusy(event.target.querySelector('button[type="submit"]'), async () => {
+        try {
+          if (edit) await api('/v1/admin/announcements/' + encodeURIComponent(edit.id), { method:'PATCH', body:payload });
+          else await api('/v1/admin/announcements', { method:'POST', body:payload });
+          state.editingAnnouncement = null; toast('Announcement saved', 'ok'); await announcementsView();
+        } catch (error) { toast(error.message, 'bad'); }
+      });
     });
     const cancel = $('#ann-cancel');
     if (cancel) cancel.addEventListener('click', () => { state.editingAnnouncement = null; announcementsView(); });
     $$('[data-ann-edit]').forEach(button => button.addEventListener('click', () => { state.editingAnnouncement = data.announcements.find(item => item.id === button.dataset.annEdit); announcementsView(); }));
     $$('[data-ann-delete]').forEach(button => button.addEventListener('click', async () => {
       if (!window.confirm('Delete this announcement permanently?')) return;
-      try { await api('/v1/admin/announcements/' + encodeURIComponent(button.dataset.annDelete), { method:'DELETE' }); toast('Announcement deleted', 'ok'); await announcementsView(); }
-      catch (error) { toast(error.message, 'bad'); }
+      await withBusy(button, async () => {
+        try {
+          await api('/v1/admin/announcements/' + encodeURIComponent(button.dataset.annDelete), { method:'DELETE' });
+          if (state.editingAnnouncement && state.editingAnnouncement.id === button.dataset.annDelete) state.editingAnnouncement = null;
+          toast('Announcement deleted', 'ok'); await announcementsView();
+        } catch (error) { toast(error.message, 'bad'); }
+      });
     }));
   }
 }
@@ -1059,7 +1119,7 @@ async function auditView(){
   const data = await api('/v1/admin/audit?range=' + encodeURIComponent(state.range) + '&page=' + state.auditPage + '&pageSize=25&action=' + encodeURIComponent(state.auditAction));
   const main = $('#main');
   main.innerHTML = '<div class="toolbar"><input class="input" id="audit-action" placeholder="Filter action prefix, e.g. user." value="' + h(state.auditAction) + '" style="min-width:260px">' +
-    (can('reports.export') ? '<a class="btn ghost" href="/v1/admin/reports/audit/export.csv?range=' + encodeURIComponent(state.range) + '">Export CSV</a>' : '') + '</div>' +
+    (can('reports.export') ? '<a class="btn ghost" href="/v1/admin/reports/audit/export.csv?range=' + encodeURIComponent(state.range) + '&action=' + encodeURIComponent(state.auditAction) + '">Export CSV</a><span class="tiny">Exports cap at 50,000 rows; the response marks truncation.</span>' : '') + '</div>' +
     '<section class="panel">' + (data.logs.length ? '<div class="table-wrap"><table><thead><tr><th>When</th><th>Administrator</th><th>Action</th><th>Target</th><th>IP</th></tr></thead><tbody>' +
       data.logs.map(log => '<tr><td>' + h(fmtAt(log.createdAt)) + '</td><td>' + h(log.adminUsername) + '</td><td class="mono">' + h(log.action) + '</td><td>' + h(log.targetType || '—') + (log.targetId ? ' <span class="tiny mono">' + h(String(log.targetId).slice(0,16)) + '</span>' : '') + '</td><td class="tiny">' + h(log.ip || '—') + '</td></tr>').join('') +
       '</tbody></table></div>' : '<div class="empty">No audit entries in this range.</div>') +
@@ -1074,11 +1134,19 @@ async function adminsView(){
   const main = $('#main');
   main.innerHTML = '<div class="grid two"><section class="panel"><h2>Administrators</h2><p class="hint">Super admin privileges are required to manage access.</p>' +
     '<div class="table-wrap"><table><thead><tr><th>Account</th><th>Role</th><th>Status</th><th>Last login</th><th></th></tr></thead><tbody>' +
-    data.admins.map(admin => '<tr><td><div class="name">' + h(admin.displayName) + '</div><div class="tiny">' + h(admin.email || admin.username) + '</div></td>' +
-      '<td>' + h(admin.role) + '</td><td>' + statusPill(admin.active ? 'active' : 'suspended') + '</td><td>' + h(fmtAt(admin.lastLoginAt)) + '</td>' +
-      '<td class="row"><button class="btn small ' + (admin.active ? 'danger' : '') + '" data-toggle-admin="' + h(admin.id) + '" data-active="' + (admin.active ? '1' : '0') + '">' + (admin.active ? 'Disable' : 'Enable') + '</button>' +
-      (admin.id !== state.admin.id ? '<button class="btn small danger" data-delete-admin="' + h(admin.id) + '" data-admin-name="' + h(admin.username) + '">Delete</button>' : '') +
-      '</td></tr>').join('') +
+    data.admins.map(admin => {
+      const roles = ['super_admin','admin','analyst','support'].map(role =>
+        '<option value="' + role + '"' + (admin.role === role ? ' selected' : '') + '>' + h(role) + '</option>').join('');
+      const controls = admin.id === state.admin.id
+        ? '<span class="tiny">Current account</span>'
+        : '<button class="btn small ' + (admin.active ? 'danger' : '') + '" data-toggle-admin="' + h(admin.id) + '" data-active="' + (admin.active ? '1' : '0') + '">' + (admin.active ? 'Disable' : 'Enable') + '</button>' +
+          '<button class="btn small danger" data-delete-admin="' + h(admin.id) + '" data-admin-name="' + h(admin.username) + '">Delete</button>';
+      return '<tr><td><div class="name">' + h(admin.displayName) + '</div><div class="tiny">' + h(admin.email || admin.username) + '</div></td>' +
+        '<td><select class="input small" data-role-admin="' + h(admin.id) + '">' + roles + '</select>' +
+        '<button class="btn small ghost" data-save-role="' + h(admin.id) + '">Save</button></td>' +
+        '<td>' + statusPill(admin.active ? 'active' : 'suspended') + '</td><td>' + h(fmtAt(admin.lastLoginAt)) + '</td>' +
+        '<td class="row">' + controls + '</td></tr>';
+    }).join('') +
     '</tbody></table></div></section>' +
     '<section class="panel"><h2>Add administrator</h2><p class="hint">Only super admins can create additional administrators.</p><form id="admin-form">' +
       '<label class="field"><span>Full name</span><input class="input" id="adm-name" type="text" required maxlength="60" autocomplete="name" placeholder="Full name"></label>' +
@@ -1096,33 +1164,52 @@ async function adminsView(){
     var errorBox = $('#adm-error');
     errorBox.style.display = 'none';
     if (passwordMismatch('adm-password', 'adm-confirm', errorBox)) return;
-    try {
-      const created = await api('/v1/admin/admins', { method:'POST', body:{
-        displayName: $('#adm-name').value.trim(),
-        email: $('#adm-email').value.trim(),
-        password: $('#adm-password').value,
-        confirmPassword: $('#adm-confirm').value,
-        role: $('#adm-role').value
-      }});
-      openModal('<div class="modal-head"><div><h3>Administrator created</h3><p class="hint">' + h(created.email) + ' can now sign in with the password you set.</p></div><button class="icon-btn close" data-close>×</button></div>' +
-        '<button class="btn primary" data-close>Done</button>');
-      bindModalClose(); toast('Administrator created', 'ok'); await adminsView();
-    } catch (error) { errorBox.textContent = error.message; errorBox.style.display = 'block'; }
+    await withBusy(event.target.querySelector('button[type="submit"]'), async () => {
+      try {
+        const created = await api('/v1/admin/admins', { method:'POST', body:{
+          displayName: $('#adm-name').value.trim(),
+          email: $('#adm-email').value.trim(),
+          password: $('#adm-password').value,
+          confirmPassword: $('#adm-confirm').value,
+          role: $('#adm-role').value
+        }});
+        openModal('<div class="modal-head"><div><h3>Administrator created</h3><p class="hint">' + h(created.email) + ' can now sign in with the password you set.</p></div><button class="icon-btn close" data-close>×</button></div>' +
+          '<button class="btn primary" data-close>Done</button>');
+        bindModalClose(); toast('Administrator created', 'ok'); await adminsView();
+      } catch (error) { errorBox.textContent = error.message; errorBox.style.display = 'block'; }
+    });
   });
+  $$('[data-save-role]').forEach(button => button.addEventListener('click', async () => {
+    const id = button.dataset.saveRole;
+    const select = $$('[data-role-admin]').find(item => item.dataset.roleAdmin === id);
+    if (!select) return;
+    const next = select.value;
+    await withBusy(button, async () => {
+      try {
+        await api('/v1/admin/admins/' + encodeURIComponent(id), { method:'PATCH', body:{ role:next } });
+        toast('Role updated', 'ok');
+        if (id === state.admin.id) location.reload(); else await adminsView();
+      } catch (error) { toast(error.message, 'bad'); }
+    });
+  }));
   $$('[data-toggle-admin]').forEach(button => button.addEventListener('click', async () => {
     const active = button.dataset.active === '1';
     if (!window.confirm((active ? 'Disable' : 'Enable') + ' this administrator?')) return;
-    try {
-      await api('/v1/admin/admins/' + encodeURIComponent(button.dataset.toggleAdmin), { method:'PATCH', body:{ active:!active } });
-      toast('Administrator updated', 'ok'); await adminsView();
-    } catch (error) { toast(error.message, 'bad'); }
+    await withBusy(button, async () => {
+      try {
+        await api('/v1/admin/admins/' + encodeURIComponent(button.dataset.toggleAdmin), { method:'PATCH', body:{ active:!active } });
+        toast('Administrator updated', 'ok'); await adminsView();
+      } catch (error) { toast(error.message, 'bad'); }
+    });
   }));
   $$('[data-delete-admin]').forEach(button => button.addEventListener('click', async () => {
     if (!window.confirm('Delete @' + button.dataset.adminName + ' permanently? Their sessions are removed.')) return;
-    try {
-      await api('/v1/admin/admins/' + encodeURIComponent(button.dataset.deleteAdmin), { method:'DELETE' });
-      toast('Administrator deleted', 'ok'); await adminsView();
-    } catch (error) { toast(error.message, 'bad'); }
+    await withBusy(button, async () => {
+      try {
+        await api('/v1/admin/admins/' + encodeURIComponent(button.dataset.deleteAdmin), { method:'DELETE' });
+        toast('Administrator deleted', 'ok'); await adminsView();
+      } catch (error) { toast(error.message, 'bad'); }
+    });
   }));
 }
 async function accountView(){
@@ -1142,18 +1229,22 @@ async function accountView(){
     var errorBox = $('#pwd-error');
     errorBox.style.display = 'none';
     if (passwordMismatch('pwd-new', 'pwd-confirm', errorBox)) return;
-    try {
-      await api('/v1/admin/auth/password', { method:'POST', allow401:true, body:{
-        currentPassword: $('#pwd-current').value,
-        newPassword: $('#pwd-new').value,
-        confirmPassword: $('#pwd-confirm').value
-      }});
-      toast('Password updated. Other sessions revoked.', 'ok'); await accountView();
-    } catch (error) { errorBox.textContent = error.message; errorBox.style.display = 'block'; }
+    await withBusy(event.target.querySelector('button[type="submit"]'), async () => {
+      try {
+        await api('/v1/admin/auth/password', { method:'POST', allow401:true, body:{
+          currentPassword: $('#pwd-current').value,
+          newPassword: $('#pwd-new').value,
+          confirmPassword: $('#pwd-confirm').value
+        }});
+        toast('Password updated. Other sessions revoked.', 'ok'); await accountView();
+      } catch (error) { errorBox.textContent = error.message; errorBox.style.display = 'block'; }
+    });
   });
   $$('[data-revoke]').forEach(button => button.addEventListener('click', async () => {
-    try { await api('/v1/admin/sessions/' + encodeURIComponent(button.dataset.revoke), { method:'DELETE' }); toast('Session revoked', 'ok'); await accountView(); }
-    catch (error) { toast(error.message, 'bad'); }
+    await withBusy(button, async () => {
+      try { await api('/v1/admin/sessions/' + encodeURIComponent(button.dataset.revoke), { method:'DELETE' }); toast('Session revoked', 'ok'); await accountView(); }
+      catch (error) { toast(error.message, 'bad'); }
+    });
   }));
 }
 function openModal(html){

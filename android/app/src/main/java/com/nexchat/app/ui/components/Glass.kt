@@ -148,28 +148,30 @@ fun GlassButton(
     text: String,
     modifier: Modifier = Modifier,
     icon: ImageVector? = null,
+    enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
     val palette = LocalNexPalette.current
     val shape = RoundedCornerShape(12.dp)
+    val contentColor = palette.textPrimary.copy(alpha = if (enabled) 1f else 0.45f)
     Row(
         modifier = modifier
             .heightIn(min = 44.dp)
             .clip(shape)
-            .background(palette.glassStrong)
+            .background(if (enabled) palette.glassStrong else palette.glassStrong.copy(alpha = 0.5f))
             .border(1.dp, palette.divider, shape)
-            .clickable(onClick = onClick)
+            .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center,
     ) {
         if (icon != null) {
-            Icon(icon, contentDescription = null, tint = palette.textPrimary, modifier = Modifier.size(18.dp))
+            Icon(icon, contentDescription = null, tint = contentColor, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(8.dp))
         }
         Text(
             text,
-            color = palette.textPrimary,
+            color = contentColor,
             style = MaterialTheme.typography.labelLarge,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,

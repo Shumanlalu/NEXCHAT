@@ -316,3 +316,34 @@ No destructive live requests were made.
 - Android implementation completed in parallel; `testDebugUnitTest` and `assembleDebug` passed with 15 JVM tests and no failures.
 - Only intended files were staged. Pre-existing `android/app/build.gradle.kts`, `NexDatabase.kt`, generated schema, resource and backup changes remained unstaged.
 - Commit `0084626664aea6d482077fe7ec91fd5942354371` was pushed to `main`; final Vercel and live-endpoint verification is recorded in section 9.
+
+## 12. Post-audit addendum (2026-11-24 coordinated release)
+
+The following residual items from this audit were addressed in the coordinated
+release documented in `RELEASE_2026-11-24.md`:
+
+- **Static TURN credentials (C-01):** public `/v1/config` still strips them, and
+  an authenticated `GET /v1/turn-credentials` endpoint now mints coturn REST API
+  credentials with a one-hour expiry from server-only `TURN_SHARED_SECRET`.
+  `turnConfigured` now requires both a TURN URL and a shared secret. Operators
+  must still rotate any credentials previously deployed.
+- **Per-instance rate limits (P-01):** `@fastify/rate-limit` now uses a
+  Postgres-backed store, so counters are shared across instances while
+  route-specific limits remain isolated. `TRUST_PROXY` still must be set
+  explicitly behind a trusted proxy.
+- **Supabase parity/RLS residual:** a second additive migration adds the
+  admin/analytics/rate-limit tables and denies Data API access to them. A
+  schema-parity regression test was added.
+- **Call signaling race:** terminal REJECT/HANGUP rows are preserved until their
+  short TTL so concurrent call cleanup cannot delete them before flushing.
+- **Group authorization:** outgoing content is stamped with `groupId` at the
+  send chokepoints, restoring relay-side group membership checks and correct
+  conversation routing; reactions additionally verify membership locally.
+- **Attachment bounds:** pre-manifest chunks are bounded by count/lifetime and
+  orphan chunks are purged by `CleanupWorker`.
+
+Still operator-owned: signing-key rotation, a release-signed APK, real-device
+Bluetooth/Airplane Mode and three-device relay verification, Supabase cutover
+approval, dependency/CI automation, mobile login lockout policy, shared pub/sub
+presence, and the other design-level residuals listed above.
+

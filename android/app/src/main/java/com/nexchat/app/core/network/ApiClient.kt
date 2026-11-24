@@ -292,6 +292,9 @@ class ApiClient(
 
     suspend fun serverConfig(): ServerConfigResponse = decode(perform("GET", "/v1/config", null, false))
 
+    suspend fun turnCredentials(): TurnCredentialsResponse =
+        decode(authenticated("GET", "/v1/turn-credentials"))
+
     suspend fun analyticsHeartbeat(): HeartbeatResponse =
         decode(
             authenticated(
@@ -364,6 +367,7 @@ class ApiClient(
             .url(url)
             .header("Accept", "application/json")
             .header("User-Agent", "NEXCHAT-Android/${BuildConfig.VERSION_NAME}")
+            .header("x-app-version", BuildConfig.VERSION_NAME)
         val access = accessOverride ?: tokens.accessToken
         if (authenticated && !access.isNullOrBlank()) {
             builder.header("Authorization", "Bearer $access")

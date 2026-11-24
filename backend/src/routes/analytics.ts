@@ -213,8 +213,16 @@ export async function registerAnalyticsRoutes(
           !row ||
           row.caller_user_id === auth.user.id ||
           row.callee_user_id === auth.user.id ||
-          (row.caller_user_id === null && callerId === auth.user.id) ||
-          (row.callee_user_id === null && calleeId === auth.user.id);
+          // A null slot may only be claimed when the other slot matches the
+          // reported peer. Otherwise an unrelated user can attach to a call.
+          (row.caller_user_id === null &&
+            callerId === auth.user.id &&
+            calleeId !== null &&
+            row.callee_user_id === calleeId) ||
+          (row.callee_user_id === null &&
+            calleeId === auth.user.id &&
+            callerId !== null &&
+            row.caller_user_id === callerId);
         if (!participant) {
           throw new HttpError(403, "CALL_NOT_YOURS", "This call belongs to another account");
         }
@@ -270,7 +278,11 @@ export async function registerAnalyticsRoutes(
              updated_at = now()
            WHERE CASE call_sessions.status
                    WHEN 'ringing' THEN 0 WHEN 'connected' THEN 1 ELSE 2 END <= $14
-             AND (call_sessions.caller_user_id = $15 OR call_sessions.callee_user_id = $15)`,
+             AND (call_sessions.caller_user_id = $15 OR call_sessions.callee_user_id = $15
+                   OR (call_sessions.caller_user_id IS NULL AND $2 = $15
+                       AND $3 IS NOT NULL AND call_sessions.callee_user_id = $3)
+                   OR (call_sessions.callee_user_id IS NULL AND $3 = $15
+                       AND $2 IS NOT NULL AND call_sessions.caller_user_id = $2))`,
           [
             body.callId,
             callerId,

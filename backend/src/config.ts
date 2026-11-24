@@ -21,6 +21,9 @@ const envSchema = z.object({
   MAX_ENVELOPE_BYTES: z.coerce.number().int().positive().default(131_072),
   MAX_ATTACHMENT_BYTES: z.coerce.number().int().positive().default(524_288),
   ICE_SERVERS_JSON: z.string().default('[{"urls":["stun:stun.l.google.com:19302"]}]'),
+  // coturn REST API shared secret. Never sent to clients; the authenticated
+  // /v1/turn-credentials endpoint mints time-limited credentials from it.
+  TURN_SHARED_SECRET: z.string().default(""),
   TRUST_PROXY: booleanString,
   LOG_LEVEL: z.string().default("info"),
   // One-time bootstrap secret for the first administrator. Setup is disabled
@@ -45,6 +48,7 @@ export type AppConfig = {
   maxEnvelopeBytes: number;
   maxAttachmentBytes: number;
   iceServers: Array<Record<string, unknown>>;
+  turnSharedSecret?: string;
   trustProxy: boolean;
   logLevel: string;
   adminSetupToken?: string;
@@ -84,6 +88,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     maxEnvelopeBytes: parsed.MAX_ENVELOPE_BYTES,
     maxAttachmentBytes: parsed.MAX_ATTACHMENT_BYTES,
     iceServers,
+    turnSharedSecret: parsed.TURN_SHARED_SECRET,
     trustProxy: parsed.TRUST_PROXY,
     logLevel: parsed.LOG_LEVEL,
     adminSetupToken: parsed.ADMIN_SETUP_TOKEN,
