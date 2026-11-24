@@ -308,7 +308,7 @@ No destructive live requests were made.
 6. **Audit tamper evidence** – failures are logged but rows are not yet hash-chained.
 7. **Skip-reason enumeration** – mobile outbox behavior currently depends on granular reasons, so generic reasons require a coordinated release.
 8. **Android runtime behavior** – JVM tests cover pure helpers; two-device manual verification is recommended after installing the rebuilt APK.
-9. **Vercel status** – final commit statuses must be checked after push; no CLI credentials were used here.
+9. **Vercel status** – resolved; both `Vercel – backend` and `Vercel – nexchat` deployment statuses were verified as successful after push, and the public admin/bootstrap/config endpoints were re-checked.
 
 ## 11. Implementation log
 
