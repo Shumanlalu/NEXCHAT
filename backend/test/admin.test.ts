@@ -7,8 +7,9 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { newDb } from "pg-mem";
 import type { Pool } from "pg";
 import type { AppConfig } from "../src/config";
-import { buildApp } from "../src/create-app";
+import { buildApp, fastifyOptions } from "../src/create-app";
 import { Database } from "../src/db";
+import { hashSessionToken } from "../src/admin/security";
 import { TokenService } from "../src/security/tokens";
 
 const USER = "cccccccc-2222-4222-8222-111111111111";
@@ -53,6 +54,12 @@ function cookiePair(setCookie: string | string[] | undefined): string {
   const value = Array.isArray(setCookie) ? setCookie[0] : setCookie;
   assert.ok(value, "expected a Set-Cookie header");
   return value.split(";")[0]!;
+}
+
+function sessionToken(cookiePairValue: string): string {
+  const separator = cookiePairValue.indexOf("=");
+  assert.ok(separator >= 0, "expected a session cookie value");
+  return decodeURIComponent(cookiePairValue.slice(separator + 1));
 }
 
 function adminHeaders(extra: Record<string, string> = {}): Record<string, string> {
@@ -112,7 +119,7 @@ describe("super admin panel", () => {
     assert.deepEqual(bootstrap.json(), {
       setupRequired: true,
       setupEnabled: true,
-      signupEnabled: true,
+      signupEnabled: false,
       sessionHours: 12,
       rememberDays: 30,
     });
@@ -146,6 +153,14 @@ describe("super admin panel", () => {
     assert.equal(body.email, "rootadmin@example.com");
     assert.equal(body.username, "rootadmin@example.com");
 
+    const row = await db.one<{ display_name: string; role: string; password_salt: string }>(
+      "SELECT display_name, role, password_salt FROM admin_users WHERE username = $1",
+      ["rootadmin@example.com"],
+    );
+    assert.equal(row?.display_name, "Root Admin");
+    assert.equal(row?.role, "super_admin");
+    assert.equal(row?.password_salt, "bcrypt-sha256:v1");
+
     const again = await app.inject({
       method: "POST",
       url: "/v1/admin/setup",
@@ -158,9 +173,16 @@ describe("super admin panel", () => {
       },
     });
     assert.equal(again.statusCode, 409);
+    assert.equal((again.json() as { error: { code: string } }).error.code, "SETUP_CLOSED");
 
     const afterSetup = await app.inject({ method: "GET", url: "/v1/admin/bootstrap" });
-    assert.equal((afterSetup.json() as { signupEnabled: boolean }).signupEnabled, false);
+    assert.deepEqual(afterSetup.json(), {
+      setupRequired: false,
+      setupEnabled: false,
+      signupEnabled: false,
+      sessionHours: 12,
+      rememberDays: 30,
+    });
   });
 
   it("logs in with email and password and sets a hardened cookie", async () => {
@@ -170,6 +192,7 @@ describe("super admin panel", () => {
       payload: { email: "rootadmin@example.com", password: "WrongPassword-123" },
     });
     assert.equal(wrong.statusCode, 401);
+    assert.equal((wrong.json() as { error: { code: string } }).error.code, "ADMIN_LOGIN_FAILED");
 
     const response = await app.inject({
       method: "POST",
@@ -258,36 +281,48 @@ describe("super admin panel", () => {
       },
     });
     assert.equal(response.statusCode, 403);
+    assert.equal((response.json() as { error: { code: string } }).error.code, "CSRF_REJECTED");
   });
 
-  it("blocks sessions without admin rights and non-super admins from registration control", async () => {
-    const anonymous = await app.inject({
-      method: "GET",
-      url: "/v1/admin/dashboard?range=7d",
-    });
+  it("blocks unauthenticated and non-super-admin access", async () => {
+    const anonymous = await app.inject({ method: "GET", url: "/v1/admin/dashboard?range=7d" });
     assert.equal(anonymous.statusCode, 401);
 
     const bearerOnly = await app.inject({
       method: "GET",
-      url: "/v1/admin/registration",
+      url: "/v1/admin/admins",
       headers: { authorization: `Bearer ${userToken}` },
     });
     assert.equal(bearerOnly.statusCode, 401);
 
-    const readOnly = await app.inject({
-      method: "GET",
-      url: "/v1/admin/registration",
-      headers: { cookie: legacyCookie },
+    const createAsUser = await app.inject({
+      method: "POST",
+      url: "/v1/admin/admins",
+      headers: { authorization: `Bearer ${userToken}` },
+      payload: {
+        displayName: "Illegal Admin",
+        email: "illegal@example.com",
+        password: TEST_PASSWORD,
+        confirmPassword: TEST_PASSWORD,
+        role: "super_admin",
+      },
     });
-    assert.equal(readOnly.statusCode, 403);
+    assert.equal(createAsUser.statusCode, 401);
 
-    const toggle = await app.inject({
-      method: "PUT",
-      url: "/v1/admin/registration",
+    const createAsAdmin = await app.inject({
+      method: "POST",
+      url: "/v1/admin/admins",
       headers: { cookie: legacyCookie, "x-admin-csrf": legacyCsrf },
-      payload: { signupEnabled: true },
+      payload: {
+        displayName: "Another Illegal Admin",
+        email: "illegal2@example.com",
+        password: TEST_PASSWORD,
+        confirmPassword: TEST_PASSWORD,
+        role: "super_admin",
+      },
     });
-    assert.equal(toggle.statusCode, 403);
+    assert.equal(createAsAdmin.statusCode, 403);
+    assert.equal((createAsAdmin.json() as { error: { code: string } }).error.code, "ADMIN_FORBIDDEN");
   });
 
   it("publishes remote config and returns it through the public endpoint", async () => {
@@ -508,116 +543,156 @@ describe("super admin panel", () => {
     assert.match(response.body, /Forgot password\?/);
     assert.match(response.body, /data-password-toggle/);
     assert.match(response.body, /Create Account/);
+    assert.doesNotMatch(response.body, /id="signup-|showSignup|v1\/admin\/signup/);
     assert.doesNotMatch(response.body, /Sign in with Google|Google Sign-In|google-auth-library/i);
   });
 
-  it("keeps token-gated signup closed until a super admin enables it", async () => {
-    const payload = {
-      displayName: "Shuman Admin",
-      email: "shuman@example.com",
-      password: TEST_PASSWORD,
-      confirmPassword: TEST_PASSWORD,
-    };
-    const closed = await app.inject({
+  it("closes setup permanently and exposes no public administrator signup", async () => {
+    const duplicateSetup = await app.inject({
+      method: "POST",
+      url: "/v1/admin/setup",
+      headers: { "x-setup-token": SETUP_TOKEN },
+      payload: {
+        displayName: "Duplicate",
+        email: "duplicate@example.com",
+        password: TEST_PASSWORD,
+        confirmPassword: TEST_PASSWORD,
+      },
+    });
+    assert.equal(duplicateSetup.statusCode, 409);
+
+    const duplicateAdmin = await app.inject({
+      method: "POST",
+      url: "/v1/admin/admins",
+      headers: adminHeaders(),
+      payload: {
+        displayName: "Duplicate Admin",
+        email: "rootadmin@example.com",
+        password: TEST_PASSWORD,
+        confirmPassword: TEST_PASSWORD,
+        role: "admin",
+      },
+    });
+    assert.equal(duplicateAdmin.statusCode, 409);
+    assert.equal((duplicateAdmin.json() as { error: { code: string } }).error.code, "ADMIN_EXISTS");
+
+    const signupEndpoint = await app.inject({
       method: "POST",
       url: "/v1/admin/signup",
       headers: { "x-setup-token": SETUP_TOKEN },
-      payload,
+      payload: {
+        displayName: "Public Admin",
+        email: "public@example.com",
+        password: TEST_PASSWORD,
+        confirmPassword: TEST_PASSWORD,
+      },
     });
-    assert.equal(closed.statusCode, 403);
-    assert.equal((closed.json() as { error: { code: string } }).error.code, "SIGNUP_DISABLED");
+    assert.equal(signupEndpoint.statusCode, 404);
 
-    const enabled = await app.inject({
+    const signupPage = await app.inject({ method: "GET", url: "/admin/signup" });
+    assert.equal(signupPage.statusCode, 404);
+
+    const registrationRead = await app.inject({
+      method: "GET",
+      url: "/v1/admin/registration",
+      headers: { cookie },
+    });
+    assert.equal(registrationRead.statusCode, 404);
+
+    const registrationWrite = await app.inject({
       method: "PUT",
       url: "/v1/admin/registration",
       headers: adminHeaders(),
       payload: { signupEnabled: true },
     });
-    assert.equal(enabled.statusCode, 200);
-    assert.equal((enabled.json() as { signupAvailable: boolean }).signupAvailable, true);
+    assert.equal(registrationWrite.statusCode, 404);
+  });
 
-    const rejected = await app.inject({
-      method: "POST",
-      url: "/v1/admin/signup",
-      headers: { "x-setup-token": "wrong" },
-      payload,
-    });
-    assert.equal(rejected.statusCode, 403);
+  it("never exposes the setup token in responses or logs", async () => {
+    const redact = (fastifyOptions(config).logger as { redact: { paths: string[] } }).redact;
+    assert.ok(redact.paths.includes("req.headers.x-setup-token"));
+    assert.ok(redact.paths.includes("req.body.resetToken"));
+    assert.ok(redact.paths.includes("res.headers.set-cookie"));
 
-    const mismatch = await app.inject({
-      method: "POST",
-      url: "/v1/admin/signup",
-      headers: { "x-setup-token": SETUP_TOKEN },
-      payload: { ...payload, email: "mismatch@example.com", confirmPassword: "DifferentPassword-123" },
-    });
-    assert.equal(mismatch.statusCode, 400);
-
-    const created = await app.inject({
-      method: "POST",
-      url: "/v1/admin/signup",
-      headers: { "x-setup-token": SETUP_TOKEN },
-      payload,
-    });
-    assert.equal(created.statusCode, 201);
-    const body = created.json() as { email: string; username: string };
-    assert.equal(body.email, "shuman@example.com");
-    assert.equal(body.username, "shuman@example.com");
-    const row = await db.one<{ role: string; display_name: string }>(
-      "SELECT role, display_name FROM admin_users WHERE username = $1",
-      ["shuman@example.com"],
-    );
-    assert.equal(row?.role, "super_admin");
-    assert.equal(row?.display_name, "Shuman Admin");
-
-    const disabled = await app.inject({
-      method: "PUT",
-      url: "/v1/admin/registration",
-      headers: adminHeaders(),
-      payload: { signupEnabled: false },
-    });
-    assert.equal(disabled.statusCode, 200);
-    const closedAgain = await app.inject({
-      method: "POST",
-      url: "/v1/admin/signup",
-      headers: { "x-setup-token": SETUP_TOKEN },
-      payload: { ...payload, email: "another@example.com" },
-    });
-    assert.equal(closedAgain.statusCode, 403);
+    for (const url of ["/v1/admin/bootstrap", "/admin", "/admin/forgot"]) {
+      const response = await app.inject({ method: "GET", url });
+      assert.doesNotMatch(response.body, new RegExp(SETUP_TOKEN));
+    }
   });
 
   it("resets a forgotten password with the setup token and revokes old sessions", async () => {
-    const existingLogin = await app.inject({
+    // The first setup uses rootadmin; create a dedicated recovery account.
+    const recoveryAdmin = await app.inject({
+      method: "POST",
+      url: "/v1/admin/admins",
+      headers: adminHeaders(),
+      payload: {
+        displayName: "Recovery Admin",
+        email: "recovery@example.com",
+        password: TEST_PASSWORD,
+        confirmPassword: TEST_PASSWORD,
+        role: "super_admin",
+      },
+    });
+    assert.equal(recoveryAdmin.statusCode, 201);
+
+    const login = await app.inject({
       method: "POST",
       url: "/v1/admin/auth/login",
-      payload: { email: "shuman@example.com", password: TEST_PASSWORD },
+      payload: { email: "recovery@example.com", password: TEST_PASSWORD },
     });
-    assert.equal(existingLogin.statusCode, 200);
-    const oldCookie = cookiePair(existingLogin.headers["set-cookie"]);
+    assert.equal(login.statusCode, 200);
+    const oldCookie = cookiePair(login.headers["set-cookie"]);
 
     const wrongToken = await app.inject({
       method: "POST",
       url: "/v1/admin/auth/reset/request",
       headers: { "x-setup-token": "wrong" },
-      payload: { email: "shuman@example.com" },
+      payload: { email: "recovery@example.com" },
     });
     assert.equal(wrongToken.statusCode, 403);
+
+    const missingAdmin = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/reset/request",
+      headers: { "x-setup-token": SETUP_TOKEN },
+      payload: { email: "missing-admin@example.com" },
+    });
+    assert.equal(missingAdmin.statusCode, 404);
 
     const request = await app.inject({
       method: "POST",
       url: "/v1/admin/auth/reset/request",
       headers: { "x-setup-token": SETUP_TOKEN },
-      payload: { email: "shuman@example.com" },
+      payload: { email: "recovery@example.com" },
     });
     assert.equal(request.statusCode, 200);
-    const requested = request.json() as { resetToken: string; expiresAt: string };
+    const requested = request.json() as { email: string; resetToken: string; expiresAt: string };
+    assert.equal(requested.email, "recovery@example.com");
     assert.ok(requested.resetToken.length >= 20);
+    assert.doesNotMatch(request.body, new RegExp(SETUP_TOKEN));
+    const expiresInMs = new Date(requested.expiresAt).getTime() - Date.now();
+    assert.ok(expiresInMs > 14 * 60 * 1000 && expiresInMs <= 15 * 60 * 1000);
+
+    const wrongOwner = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/reset/confirm",
+      payload: {
+        token: requested.resetToken,
+        email: "rootadmin@example.com",
+        newPassword: NEW_PASSWORD,
+        confirmPassword: NEW_PASSWORD,
+      },
+    });
+    assert.equal(wrongOwner.statusCode, 400);
+    assert.equal((wrongOwner.json() as { error: { code: string } }).error.code, "RESET_TOKEN_INVALID");
 
     const mismatch = await app.inject({
       method: "POST",
       url: "/v1/admin/auth/reset/confirm",
       payload: {
         token: requested.resetToken,
-        email: "shuman@example.com",
+        email: "recovery@example.com",
         newPassword: NEW_PASSWORD,
         confirmPassword: "DifferentPassword-789",
       },
@@ -629,7 +704,7 @@ describe("super admin panel", () => {
       url: "/v1/admin/auth/reset/confirm",
       payload: {
         token: requested.resetToken,
-        email: "shuman@example.com",
+        email: "recovery@example.com",
         newPassword: NEW_PASSWORD,
         confirmPassword: NEW_PASSWORD,
       },
@@ -648,7 +723,7 @@ describe("super admin panel", () => {
       url: "/v1/admin/auth/reset/confirm",
       payload: {
         token: requested.resetToken,
-        email: "shuman@example.com",
+        email: "recovery@example.com",
         newPassword: NEW_PASSWORD,
         confirmPassword: NEW_PASSWORD,
       },
@@ -658,23 +733,59 @@ describe("super admin panel", () => {
     const oldPassword = await app.inject({
       method: "POST",
       url: "/v1/admin/auth/login",
-      payload: { email: "shuman@example.com", password: TEST_PASSWORD },
+      payload: { email: "recovery@example.com", password: TEST_PASSWORD },
     });
     assert.equal(oldPassword.statusCode, 401);
 
     const newPassword = await app.inject({
       method: "POST",
       url: "/v1/admin/auth/login",
-      payload: { email: "shuman@example.com", password: NEW_PASSWORD },
+      payload: { email: "recovery@example.com", password: NEW_PASSWORD },
     });
     assert.equal(newPassword.statusCode, 200);
+  });
+
+  it("rejects an expired one-time reset token", async () => {
+    const request = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/reset/request",
+      headers: { "x-setup-token": SETUP_TOKEN },
+      payload: { email: "rootadmin@example.com" },
+    });
+    assert.equal(request.statusCode, 200);
+    const { resetToken } = request.json() as { resetToken: string };
+
+    await db.query("UPDATE admin_password_resets SET expires_at = $1 WHERE token_hash = $2", [
+      new Date(Date.now() - 1000),
+      hashSessionToken(resetToken),
+    ]);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/reset/confirm",
+      payload: {
+        token: resetToken,
+        email: "rootadmin@example.com",
+        newPassword: NEW_PASSWORD,
+        confirmPassword: NEW_PASSWORD,
+      },
+    });
+    assert.equal(response.statusCode, 400);
+    assert.equal((response.json() as { error: { code: string } }).error.code, "RESET_TOKEN_INVALID");
+
+    const login = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/login",
+      payload: { email: "rootadmin@example.com", password: TEST_PASSWORD },
+    });
+    assert.equal(login.statusCode, 200);
   });
 
   it("logs out by revoking only the current session", async () => {
     const login = await app.inject({
       method: "POST",
       url: "/v1/admin/auth/login",
-      payload: { email: "shuman@example.com", password: NEW_PASSWORD },
+      payload: { email: "recovery@example.com", password: NEW_PASSWORD },
     });
     assert.equal(login.statusCode, 200);
     const sessionCookie = cookiePair(login.headers["set-cookie"]);
@@ -701,6 +812,29 @@ describe("super admin panel", () => {
     assert.equal(mainStillValid.statusCode, 200);
   });
 
+  it("refuses expired admin sessions", async () => {
+    const login = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/login",
+      payload: { email: "recovery@example.com", password: NEW_PASSWORD },
+    });
+    assert.equal(login.statusCode, 200);
+    const expiredCookie = cookiePair(login.headers["set-cookie"]);
+
+    await db.query("UPDATE admin_sessions SET expires_at = $1 WHERE token_hash = $2", [
+      new Date(Date.now() - 1000),
+      hashSessionToken(sessionToken(expiredCookie)),
+    ]);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/v1/admin/auth/me",
+      headers: { cookie: expiredCookie },
+    });
+    assert.equal(response.statusCode, 401);
+    assert.equal((response.json() as { error: { code: string } }).error.code, "ADMIN_SESSION_EXPIRED");
+  });
+
   it("rate limits repeated break-glass reset attempts", async () => {
     let last;
     for (let attempt = 0; attempt < 4; attempt += 1) {
@@ -708,7 +842,7 @@ describe("super admin panel", () => {
         method: "POST",
         url: "/v1/admin/auth/reset/request",
         headers: { "x-setup-token": "wrong" },
-        payload: { email: "shuman@example.com" },
+        payload: { email: "rootadmin@example.com" },
       });
     }
     assert.equal(last?.statusCode, 429);

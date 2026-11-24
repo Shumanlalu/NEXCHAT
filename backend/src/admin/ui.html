@@ -434,7 +434,6 @@ async function boot(){
     state.boot = data;
     const path = location.pathname.replace(/\/+$/, '');
     if (path === '/admin/forgot') return showForgot();
-    if (path === '/admin/signup') return showSignup(data);
     if (data.setupRequired) return showSetup(data);
     const me = await fetch('/v1/admin/auth/me', { credentials:'same-origin' });
     if (me.status === 200) {
@@ -464,15 +463,10 @@ function showLogin(message){
     '</form>' +
     '<div class="auth-links">' +
       '<button type="button" id="login-forgot">Forgot password?</button>' +
-      (state.boot && state.boot.signupEnabled
-        ? '<button type="button" id="login-signup">Create administrator</button>'
-        : '') +
     '</div>' +
     '<p class="tiny" style="margin-top:14px">Sessions expire after ' + h(sessionHours) + ' hours' + (rememberDays ? ' or ' + h(rememberDays) + ' days with Remember me' : '') + ' and are bound to an HttpOnly, SameSite cookie.</p>'
   );
   $('#login-forgot').addEventListener('click', () => { location.href = '/admin/forgot'; });
-  var signupLink = $('#login-signup');
-  if (signupLink) signupLink.addEventListener('click', () => { location.href = '/admin/signup'; });
   $('#login-form').addEventListener('submit', async event => {
     event.preventDefault();
     var button = $('#login-submit'), errorBox = $('#login-error');
@@ -501,7 +495,7 @@ function showSetup(bootstrap){
   if (!bootstrap.setupEnabled) {
     authShell('Setup is locked', 'The relay is refusing first-run setup until a bootstrap secret is configured.',
       '<div class="notice warn"><b>ADMIN_SETUP_TOKEN is not configured.</b><br>Add a long random value as an <span class="mono">ADMIN_SETUP_TOKEN</span> environment variable in the Vercel project, redeploy, then reload this page.</div>' +
-      '<p class="tiny">If an administrator already exists, setup stays closed permanently. Use the existing account or the signup page with the setup token.</p>'
+      '<p class="tiny">If an administrator already exists, setup stays closed permanently. Use the existing account, or recover it with Forgot password and the setup token.</p>'
     );
     return;
   }
@@ -544,59 +538,6 @@ function showSetup(bootstrap){
     }
   });
 }
-function showSignup(bootstrap){
-  if (!bootstrap.signupEnabled) {
-    authShell('Signup is locked', 'Break-glass administrator signup is not available.',
-      '<div class="notice warn"><b>Signup stays closed unless a super admin enables it and ADMIN_SETUP_TOKEN is configured.</b><br>Use an existing administrator account to create additional admins from the Administrators page.</div>' +
-      '<p class="tiny"><a href="/admin" style="color:inherit">Back to sign in</a></p>'
-    );
-    return;
-  }
-  authShell('Create an administrator', 'Token-gated break-glass enrollment for a super admin. A super admin must leave it enabled.',
-    '<form id="signup-form">' +
-      '<label class="field"><span>One-time setup token</span><input class="input" id="signup-token" type="password" autocomplete="off" required></label>' +
-      '<label class="field"><span>Full name</span><input class="input" id="signup-name" type="text" autocomplete="name" required maxlength="60" placeholder="Your name"></label>' +
-      '<label class="field"><span>Email address</span><input class="input" id="signup-email" type="email" autocomplete="username" required maxlength="254" placeholder="you@example.com"></label>' +
-      passwordField('signup-password', 'Password (12+ characters)', { autocomplete:'new-password', min:12 }) +
-      passwordField('signup-confirm', 'Confirm password', { autocomplete:'new-password', min:12 }) +
-      '<div class="error-box" id="signup-error" style="display:none"></div>' +
-      '<button class="btn primary" id="signup-submit" type="submit">Create Account</button>' +
-      '<div class="auth-links"><button type="button" id="signup-back">Back to sign in</button></div>' +
-    '</form>'
-  );
-  $('#signup-back').addEventListener('click', () => { location.href = '/admin'; });
-  $('#signup-form').addEventListener('submit', async event => {
-    event.preventDefault();
-    var button = $('#signup-submit'), errorBox = $('#signup-error');
-    errorBox.style.display = 'none';
-    if (passwordMismatch('signup-password', 'signup-confirm', errorBox)) return;
-    button.disabled = true; button.textContent = 'Creating…';
-    try {
-      await api('/v1/admin/signup', {
-        method: 'POST',
-        headers: { 'x-setup-token': $('#signup-token').value.trim() },
-        body: {
-          displayName: $('#signup-name').value.trim(),
-          email: $('#signup-email').value.trim(),
-          password: $('#signup-password').value,
-          confirmPassword: $('#signup-confirm').value
-        }
-      });
-      authShell('Administrator created', 'Sign in with the email address and password you just chose.',
-        '<div class="notice ok">Your account is ready. Sign in to continue.</div>' +
-        '<button class="btn primary" id="signup-continue" style="margin-top:14px">Go to sign in</button>'
-      );
-      $('#signup-continue').addEventListener('click', () => {
-        history.replaceState(null, '', '/admin');
-        showLogin();
-      });
-    } catch (error) {
-      errorBox.textContent = error.message; errorBox.style.display = 'block';
-      button.disabled = false; button.textContent = 'Create Account';
-    }
-  });
-}
-
 function showForgot(){
   state.admin = null; state.csrf = null; state.reset = null;
   authShell('Forgot password', 'Enter your administrator email address and the setup token.',
@@ -1119,10 +1060,7 @@ async function auditView(){
   $('#audit-next').addEventListener('click', () => { state.auditPage += 1; auditView(); });
 }
 async function adminsView(){
-  const [data, registrationData] = await Promise.all([
-    api('/v1/admin/admins'),
-    api('/v1/admin/registration')
-  ]);
+  const data = await api('/v1/admin/admins');
   const main = $('#main');
   main.innerHTML = '<div class="grid two"><section class="panel"><h2>Administrators</h2><p class="hint">Super admin privileges are required to manage access.</p>' +
     '<div class="table-wrap"><table><thead><tr><th>Account</th><th>Role</th><th>Status</th><th>Last login</th><th></th></tr></thead><tbody>' +
@@ -1140,15 +1078,9 @@ async function adminsView(){
       '<label class="field"><span>Role</span><select id="adm-role"><option value="admin">Admin — operations</option><option value="support">Support — user assistance</option><option value="analyst">Analyst — read-only</option><option value="super_admin">Super admin — full control</option></select></label>' +
       '<div class="error-box" id="adm-error" style="display:none"></div>' +
       '<button class="btn primary" type="submit">Create administrator</button></form></section>' +
-    '<section class="panel"><h2>Registration control</h2><p class="hint">Break-glass signup stays off unless you explicitly enable it.</p>' +
-      '<div class="notice' + (registrationData.signupAvailable ? ' warn' : '') + '">' +
-        '<b>Token-gated signup is ' + (registrationData.signupAvailable ? 'enabled' : 'disabled') + '.</b><br>' +
-        (registrationData.registration.updatedAt ? 'Updated ' + h(fmtAt(registrationData.registration.updatedAt)) + '. ' : '') +
-        'Only someone holding ADMIN_SETUP_TOKEN can use it, never an ordinary app user.' +
-      '</div>' +
-      '<button class="btn ' + (registrationData.signupAvailable ? 'danger' : 'primary') + '" id="registration-toggle" type="button" data-enabled="' + (registrationData.signupAvailable ? '1' : '0') + '">' +
-        (registrationData.signupAvailable ? 'Disable public registration' : 'Enable token-gated signup') +
-      '</button></section></div>';
+    '<section class="panel"><h2>Access control</h2><p class="hint">There is no public administrator signup. New accounts require an authenticated super admin session, a valid CSRF token, and an explicit role.</p>' +
+      '<div class="notice ok">First-run setup closes permanently after the first administrator. Lost access is recovered through Forgot password with the setup token, not by self-registration.</div>' +
+    '</section></div>';
   $('#admin-form').addEventListener('submit', async event => {
     event.preventDefault();
     var errorBox = $('#adm-error');
@@ -1166,14 +1098,6 @@ async function adminsView(){
         '<button class="btn primary" data-close>Done</button>');
       bindModalClose(); toast('Administrator created', 'ok'); await adminsView();
     } catch (error) { errorBox.textContent = error.message; errorBox.style.display = 'block'; }
-  });
-  $('#registration-toggle').addEventListener('click', async () => {
-    var enabled = $('#registration-toggle').dataset.enabled === '1';
-    try {
-      await api('/v1/admin/registration', { method:'PUT', body:{ signupEnabled: !enabled } });
-      toast(enabled ? 'Registration disabled' : 'Token-gated signup enabled', 'ok');
-      await adminsView();
-    } catch (error) { toast(error.message, 'bad'); }
   });
   $$('[data-toggle-admin]').forEach(button => button.addEventListener('click', async () => {
     const active = button.dataset.active === '1';

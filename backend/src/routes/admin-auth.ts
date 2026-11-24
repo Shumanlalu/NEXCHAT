@@ -29,7 +29,6 @@ import {
   type AdminRole,
   type AdminRow,
 } from "../admin/security";
-import { isAdminSignupOpen } from "../admin/registration";
 
 interface Deps {
   db: Database;
@@ -171,7 +170,9 @@ export async function registerAdminAuthRoutes(
     return reply.send({
       setupRequired: count === 0,
       setupEnabled: count === 0 && Boolean(config.adminSetupToken),
-      signupEnabled: await isAdminSignupOpen(db, config, count),
+      // There is no public administrator signup. Fresh databases use /setup;
+      // later accounts are created only by an authenticated super admin.
+      signupEnabled: false,
       sessionHours: sessionHours,
       rememberDays: ADMIN_REMEMBER_SECONDS / 86_400,
     });
@@ -205,55 +206,6 @@ export async function registerAdminAuthRoutes(
         role: "super_admin",
       });
       await audit(db, id, "admin.setup.completed", request, "admin", id, {
-        email: body.email,
-      });
-      return reply.code(201).send({
-        id,
-        email: body.email,
-        username: body.email,
-        message: "Administrator created. Sign in with this email and your password.",
-      });
-    },
-  );
-
-  // Break-glass enrollment. The normal setup route closes permanently once an
-  // admin exists. This route requires ADMIN_SETUP_TOKEN *and* an explicit
-  // super-admin setting, so it is never public self-service registration.
-  app.post(
-    "/v1/admin/signup",
-    { config: { rateLimit: { max: 5, timeWindow: "15 minutes" } } },
-    async (request, reply) => {
-      const count = await adminCount(db);
-      if (!(await isAdminSignupOpen(db, config, count))) {
-        throw new HttpError(403, "SIGNUP_DISABLED", "Administrator signup is disabled");
-      }
-      const expectedToken = config.adminSetupToken ?? "";
-      if (!expectedToken) {
-        throw new HttpError(503, "SETUP_DISABLED", "Administrator signup is disabled");
-      }
-      const token = suppliedHeaderToken(request);
-      if (!token || !secureEqual(token, expectedToken)) {
-        await audit(db, null, "admin.signup.rejected", request, "admin", undefined, {
-          reason: "bad setup token",
-        });
-        throw new HttpError(403, "SETUP_TOKEN_INVALID", "The setup token is incorrect");
-      }
-      const body = parseWith(setupBody, request.body);
-      const passwordError = validatePassword(body.password, 12);
-      if (passwordError) throw new HttpError(400, "WEAK_PASSWORD", passwordError);
-      const existing = await db.one<{ id: string }>(
-        "SELECT id FROM admin_users WHERE username = $1",
-        [body.email],
-      );
-      if (existing) throw new HttpError(409, "ADMIN_EXISTS", "That administrator already exists");
-
-      const id = await insertAdmin(db, config, {
-        email: body.email,
-        displayName: body.displayName,
-        password: body.password,
-        role: "super_admin",
-      });
-      await audit(db, id, "admin.signup.completed", request, "admin", id, {
         email: body.email,
       });
       return reply.code(201).send({

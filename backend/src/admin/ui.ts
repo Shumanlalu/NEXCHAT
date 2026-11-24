@@ -48,6 +48,15 @@ function sendAdminUi(reply: FastifyReply): void {
 }
 
 export async function registerAdminUiRoutes(app: FastifyInstance): Promise<void> {
+  // Administrator creation after first-run setup is only possible from an
+  // authenticated session, never from a public signup page.
+  app.get("/admin/signup", async (_request, reply) => {
+    reply
+      .code(404)
+      .type("text/plain; charset=utf-8")
+      .header("cache-control", "no-store, max-age=0")
+      .send("Administrator signup is not available.");
+  });
   app.get("/admin", async (_request, reply) => sendAdminUi(reply));
   app.get("/admin/*", async (_request, reply) => sendAdminUi(reply));
 }

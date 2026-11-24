@@ -164,8 +164,9 @@ Features:
   prehash; existing scrypt rows are verified with their original parameters and
   transparently upgraded on the next successful login. HttpOnly
   `SameSite=Strict` cookies, HMAC CSRF tokens, and lockout after repeated failures
-  are preserved. No Google Sign-In, Google Authenticator, TOTP code, or QR scan
-  is required. Existing username-only admin rows keep working so an
+  are preserved. Setup tokens, reset tokens, passwords and session cookies are
+  redacted from server logs. No Google Sign-In, Google Authenticator, TOTP code,
+  or QR scan is required. Existing username-only admin rows keep working so an
   already-deployed panel is not locked out by this change.
 - Role-based access: `super_admin`, `admin`, `analyst`, and `support`. Every
   sensitive action is written to an append-only audit log.
@@ -186,24 +187,33 @@ Configure the panel on Vercel (or in `.env` for Docker/local):
 
 | Variable | Purpose |
 | --- | --- |
-| `ADMIN_SETUP_TOKEN` | Bootstrap secret for `POST /v1/admin/setup`, break-glass `POST /v1/admin/signup`, and `POST /v1/admin/auth/reset/request`. Empty disables all three. Setup closes permanently once an administrator exists. |
+| `ADMIN_SETUP_TOKEN` | Bootstrap secret for `POST /v1/admin/setup` and `POST /v1/admin/auth/reset/request`. Empty disables both. Setup closes permanently once an administrator exists; there is no public admin signup. |
 | `ADMIN_SESSION_HOURS` | Normal admin session lifetime, default `12`, maximum `72`. Remember me extends the cookie to 30 days. |
 | `CRON_SECRET` | Bearer token for `POST /v1/internal/heartbeat` (uptime sample plus retention cleanup). Vercel Cron sends it automatically. |
 
 Bootstrap on a fresh database:
 
 ```powershell
-# From the repository root (the Vercel project root directory is backend/)
+# Generate a fresh 256-bit token locally, then paste it into Vercel.
+cd backend
+npm run generate:setup-token
+cd ..
 npx vercel env add ADMIN_SETUP_TOKEN production
 npx vercel env add CRON_SECRET production
 npx vercel --prod --yes
 ```
 
+The generator prints only the token on stdout and keeps the instruction on
+stderr. Do not commit the value, put it in frontend code, or paste it into chat.
+If `ADMIN_SETUP_TOKEN` already exists and is still private, keep it; rotating it
+only affects first-run setup and password recovery.
+
 Open `https://nexchat-three.vercel.app/admin`, enter the setup token, full name,
 email ID and password, then sign in with them. Nothing is shown to scan or enter
 in an authenticator app. After the first administrator exists, setup returns
-`409` even if the bootstrap token remains configured, and break-glass signup is
-**disabled by default**.
+`409` even if the bootstrap token remains configured. There is no public
+administrator signup page or API; `/admin/signup` and
+`POST /v1/admin/signup` return `404`.
 
 ### Creating another admin
 
@@ -211,14 +221,7 @@ Ordinary NEXCHAT users cannot register as administrators. A signed-in super
 admin opens **Administrators** in the panel, enters the new admin's full name,
 email and password, and chooses a role. `POST /v1/admin/admins` requires the
 `admins.manage` permission, a valid CSRF token, and writes an `admin.created`
-audit entry.
-
-If a super admin needs temporary break-glass enrollment, use the
-**Registration control** card on the same page to enable token-gated signup.
-Only while it is enabled, and only with the `ADMIN_SETUP_TOKEN`, can
-`https://nexchat-three.vercel.app/admin/signup` create another super admin. Turn
-it off again immediately; the setting is stored in `app_settings` and survives
-redeployments.
+audit entry. Duplicate email addresses are rejected with `409`.
 
 ### Recovering a locked-out account
 

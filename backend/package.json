@@ -10,7 +10,8 @@
     "start": "node dist/server.js",
     "build": "tsc -p tsconfig.json && node scripts/copy-assets.js",
     "test": "tsx --test test/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "generate:setup-token": "node scripts/generate-admin-setup-token.js"
   },
   "engines": {
     "node": "24.x"

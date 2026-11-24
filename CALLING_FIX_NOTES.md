@@ -102,13 +102,15 @@ as priority envelopes.
 
 10. **The admin auth UX and password storage needed a full upgrade.** The panel
    now has show/hide passwords, Remember me (30-day session), a setup-token
-   forgot-password flow, full name and confirm password fields, responsive
-   light/dark animations, and a super-admin toggle that keeps break-glass
-   registration disabled by default. New passwords use bcrypt with a SHA-256
-   prehash; legacy scrypt hashes verify and upgrade on login. No Google OAuth,
-   Google Sign-In dependency, TOTP, or QR enrollment exists in the live backend
-   (`admin-auth.ts`, `admin-config.ts`, `registration.ts`, `passwords.ts`,
-   `schema.sql`, `ui.html`, `create-app.ts`).
+   forgot-password flow, full name and confirm password fields, and responsive
+   light/dark animations. Public admin signup was removed completely: first-run
+   setup closes permanently, and later admins are created only by an
+   authenticated super admin with CSRF and `admins.manage`. New passwords use
+   bcrypt with a SHA-256 prehash; legacy scrypt hashes verify and upgrade on
+   login. Setup tokens, reset tokens, passwords and session cookies are redacted
+   from logs. No Google OAuth, Google Sign-In dependency, TOTP, or QR enrollment
+   exists in the live backend (`admin-auth.ts`, `admin-config.ts`, `ui.ts`,
+   `passwords.ts`, `schema.sql`, `ui.html`, `create-app.ts`).
 
 ## Modified files
 
@@ -133,7 +135,7 @@ as priority envelopes.
 - `backend/src/routes/admin-config.ts`
 - `backend/src/routes/admin-core.ts`
 - `backend/src/admin/security.ts`
-- `backend/src/admin/registration.ts`
+- `backend/src/admin/ui.ts`
 - `backend/src/admin/ui.html`
 - `backend/src/admin/qr.ts` (removed with the QR dependency)
 - `backend/src/security/passwords.ts`
@@ -141,7 +143,10 @@ as priority envelopes.
 - `backend/src/create-app.ts`
 - `backend/vercel.json`
 - `backend/package.json` / `backend/package-lock.json`
+- `backend/scripts/generate-admin-setup-token.js`
 - `backend/test/admin.test.ts`
+- `backend/test/passwords.test.ts`
+- `backend/test/setup-token.test.ts`
 - `backend/test/wait.test.ts`
 
 A pre-change copy of these files is in `CALL_FIX_BACKUP_20261123/`.
