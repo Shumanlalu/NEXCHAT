@@ -286,14 +286,17 @@ No destructive tests were run. No third-party systems were accessed. No real use
 
 ## 9. Deployment and live verification
 
-Pending commit/push. After deployment, re-check:
+Pushed commit `0084626664aea6d482077fe7ec91fd5942354371` to `main`. Verified after deployment:
 
-- `GET /admin` → 200 with nonce CSP and no public signup controls
-- `GET /v1/admin/bootstrap` → setup closed, signup disabled
-- `GET /v1/config` → no TURN `username`/`credential`
-- `POST /v1/admin/signup` → 404
+- `Vercel – backend` → success
+- `Vercel – nexchat` → success
+- `GET /admin` → 200 with nonce CSP, `frame-ancestors 'none'`, no public signup controls
+- `GET /v1/admin/bootstrap` → `setupRequired:false`, `setupEnabled:false`, `signupEnabled:false`
+- `GET /v1/config` → 200 with STUN-only `iceServers`; no TURN `username` or `credential`; `turnConfigured:false`
+- `GET /v1/admin/signup` → 404
 - `GET /v1/admin/auth/me` unauthenticated → 401
-- Vercel checks: `Vercel – backend` and `Vercel – nexchat` both successful
+
+No destructive live requests were made.
 
 ## 10. Remaining uncertainties
 
@@ -309,4 +312,7 @@ Pending commit/push. After deployment, re-check:
 
 ## 11. Implementation log
 
-Backend implementation and verification completed before Android final build. Android implementation log and deployment result will be appended after the Kotlin build/tests and commit/push verification.
+- Backend implementation completed first; `npm run typecheck`, `npm test` (56/56), `npm run build` and admin UI syntax check all passed.
+- Android implementation completed in parallel; `testDebugUnitTest` and `assembleDebug` passed with 15 JVM tests and no failures.
+- Only intended files were staged. Pre-existing `android/app/build.gradle.kts`, `NexDatabase.kt`, generated schema, resource and backup changes remained unstaged.
+- Commit `0084626664aea6d482077fe7ec91fd5942354371` was pushed to `main`; final Vercel and live-endpoint verification is recorded in section 9.
