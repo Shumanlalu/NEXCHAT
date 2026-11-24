@@ -83,9 +83,10 @@ as priority envelopes.
    registry handles clients that disconnect during authentication (`hub.ts`,
    `create-app.ts`).
 
-6. **Vercel function duration was not configured**. `backend/vercel.json` now requests
-   a 60-second `maxDuration` for the server entrypoint and any `api/**/*.ts` handlers.
-   The long poll asks for 20 seconds, so it can complete before the function is frozen.
+6. **Vercel function duration was not configured**. The earlier attempt to declare
+   `maxDuration` with a `functions` pattern broke every deploy because this app has
+   no `api/` directory. The invalid mapping is removed; set 60 seconds in Project
+   Settings → Functions if longer polls are needed. The long poll asks for 20 seconds.
 
 7. **Cron cleanup was spoofable when `CRON_SECRET` was unset**. In production the
    heartbeat now returns 503 until `CRON_SECRET` is configured.
