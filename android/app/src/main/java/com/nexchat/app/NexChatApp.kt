@@ -21,6 +21,7 @@ import com.nexchat.app.core.db.NexDatabase
 import com.nexchat.app.core.network.ApiClient
 import com.nexchat.app.core.network.NexJson
 import com.nexchat.app.core.security.SecureSessionStore
+import com.nexchat.app.core.settings.GroupMetadataWatermarkStore
 import com.nexchat.app.core.settings.SettingsStore
 import com.nexchat.app.core.telemetry.Telemetry
 import com.nexchat.app.data.AuthRepository
@@ -57,7 +58,12 @@ class AppContainer(val app: Application) {
     val signalStore: NexSignalStore by lazy { NexSignalStore(db) }
     val crypto: SignalCryptoManager by lazy { SignalCryptoManager(signalStore, NexJson) }
     val auth: AuthRepository by lazy { AuthRepository(db, api, secure, crypto, settings, scope) }
-    val chat: ChatRepository by lazy { ChatRepository(db, api, crypto, settings) }
+    private val groupMetadataWatermarks by lazy {
+        GroupMetadataWatermarkStore(
+            app.applicationContext.getSharedPreferences("nexchat_group_meta", Context.MODE_PRIVATE),
+        )
+    }
+    val chat: ChatRepository by lazy { ChatRepository(db, api, crypto, settings, groupMetadataWatermarks) }
     val contacts: ContactRepository by lazy { ContactRepository(db, api, crypto) }
     val remoteConfig: RemoteConfigStore by lazy { RemoteConfigStore(app, api) }
     val telemetry: Telemetry by lazy { Telemetry(app, api, auth, scope) }
@@ -92,9 +98,11 @@ class AppContainer(val app: Application) {
     private fun wire() {
         if (wired) return
         wired = true
+        api.setSessionInvalidationHandler { auth.invalidateSession() }
         scope.launch {
             auth.state.collectLatest { state ->
                 if (state is AuthState.LoggedIn) {
+                    api.resetSessionRevocation()
                     startMessagingService()
                     websocket.start()
                     scope.launch { runCatching { remoteConfig.refresh() } }

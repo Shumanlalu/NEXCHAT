@@ -82,7 +82,11 @@ function pageFrom(query: unknown): { page: number; pageSize: number; offset: num
 
 function csvEscape(value: unknown): string {
   if (value === null || value === undefined) return "";
-  const text = String(value);
+  let text = String(value);
+  // Spreadsheet applications interpret these leading characters as formulas.
+  // Prefixing with an apostrophe keeps the cell as text when an admin opens
+  // the export, without changing the underlying stored value.
+  if (/^[=+\-@\t\r\n]/.test(text)) text = `'${text}`;
   return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
 }
 
@@ -157,8 +161,13 @@ async function healthSnapshot(db: Database): Promise<Record<string, unknown>> {
   };
 }
 
-function userStatus(row: { deleted_at?: unknown; suspended_at?: unknown }): string {
+function userStatus(row: {
+  deleted_at?: unknown;
+  suspended_at?: unknown;
+  banned_at?: unknown;
+}): string {
   if (row.deleted_at) return "deleted";
+  if (row.banned_at) return "banned";
   if (row.suspended_at) return "suspended";
   return "active";
 }
@@ -172,6 +181,8 @@ function mapUser(row: Record<string, unknown>): Record<string, unknown> {
     status: userStatus(row),
     suspendedReason: row.suspended_reason ?? null,
     suspendedAt: iso(row.suspended_at),
+    bannedReason: row.banned_reason ?? null,
+    bannedAt: iso(row.banned_at),
     deletedAt: iso(row.deleted_at),
     createdAt: iso(row.created_at),
     lastSeenAt: iso(row.last_seen_at),
@@ -219,7 +230,7 @@ function mapCall(row: Record<string, unknown>): Record<string, unknown> {
 }
 
 const userActionSchema = z.object({
-  action: z.enum(["suspend", "restore", "delete"]),
+  action: z.enum(["suspend", "ban", "restore", "unban", "delete"]),
   reason: z.string().trim().max(300).optional(),
 });
 
@@ -450,9 +461,13 @@ export async function registerAdminCoreRoutes(
     const conditions: string[] = ["1=1"];
     const params: unknown[] = [];
     if (status === "active") {
-      conditions.push("u.deleted_at IS NULL AND u.suspended_at IS NULL");
+      conditions.push(
+        "u.deleted_at IS NULL AND u.suspended_at IS NULL AND u.banned_at IS NULL",
+      );
     } else if (status === "suspended") {
       conditions.push("u.deleted_at IS NULL AND u.suspended_at IS NOT NULL");
+    } else if (status === "banned") {
+      conditions.push("u.deleted_at IS NULL AND u.banned_at IS NOT NULL");
     } else if (status === "deleted") {
       conditions.push("u.deleted_at IS NOT NULL");
     } else {
@@ -479,13 +494,13 @@ export async function registerAdminCoreRoutes(
     );
     const rows = await db.query<Record<string, unknown>>(
       `SELECT u.id, u.nex_id, u.username, u.display_name, u.created_at,
-              u.suspended_at, u.suspended_reason, u.deleted_at,
+              u.suspended_at, u.suspended_reason, u.banned_at, u.banned_reason, u.deleted_at,
               count(d.id) FILTER (WHERE d.revoked_at IS NULL) AS device_count,
               max(d.last_seen_at) AS last_seen_at, max(d.platform) AS platform
        FROM users u LEFT JOIN devices d ON d.user_id = u.id
        WHERE ${where}
        GROUP BY u.id, u.nex_id, u.username, u.display_name, u.created_at,
-                u.suspended_at, u.suspended_reason, u.deleted_at
+                u.suspended_at, u.suspended_reason, u.banned_at, u.banned_reason, u.deleted_at
        ORDER BY ${order}
        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, pageSize, offset],
@@ -598,7 +613,24 @@ export async function registerAdminCoreRoutes(
         [id],
       );
       hub.closeUser(id, 4003, "account suspended");
+    } else if (body.action === "ban") {
+      await db.query(
+        "UPDATE users SET banned_at = now(), banned_reason = $1 WHERE id = $2",
+        [body.reason?.slice(0, 300) ?? null, id],
+      );
+      await db.query(
+        "UPDATE refresh_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL",
+        [id],
+      );
+      hub.closeUser(id, 4003, "account banned");
+    } else if (body.action === "unban") {
+      await db.query(
+        "UPDATE users SET banned_at = NULL, banned_reason = NULL WHERE id = $1",
+        [id],
+      );
     } else if (body.action === "restore") {
+      // A normal restore clears temporary suspension/soft-delete, not an
+      // explicit enforcement ban. Use "unban" for that.
       await db.query(
         `UPDATE users SET suspended_at = NULL, suspended_reason = NULL, deleted_at = NULL
          WHERE id = $1`,
@@ -839,18 +871,28 @@ export async function registerAdminCoreRoutes(
   });
 
   app.get("/v1/admin/reports/:type/export.csv", async (request, reply) => {
-    await requireAdmin(request, db, config, "reports.export");
+    const context = await requireAdmin(request, db, config, "reports.export");
     const { type } = request.params as { type: string };
     const range = parseRange((request.query as Record<string, unknown>).range);
+    const recordExport = (rowCount: number, exportType = type): Promise<void> =>
+      audit(db, context.admin.id, "report.exported", request, "report", exportType, {
+        range: range.key,
+        rowCount,
+      });
     if (type === "users") {
       const rows = await db.query<Record<string, unknown>>(
         `SELECT u.nex_id, u.username, u.display_name, u.created_at, u.suspended_at,
-                u.deleted_at,
-                (SELECT max(last_seen_at) FROM devices WHERE user_id = u.id) AS last_seen_at,
-                (SELECT count(*) FROM devices WHERE user_id = u.id AND revoked_at IS NULL) AS devices
-         FROM users u WHERE u.created_at >= $1 ORDER BY u.created_at DESC LIMIT 50000`,
+                u.deleted_at, d.last_seen_at, d.devices
+         FROM users u
+         LEFT JOIN (
+           SELECT user_id, max(last_seen_at) AS last_seen_at,
+                  count(*) FILTER (WHERE revoked_at IS NULL) AS devices
+           FROM devices GROUP BY user_id
+         ) d ON d.user_id = u.id
+         WHERE u.created_at >= $1 ORDER BY u.created_at DESC LIMIT 50000`,
         [range.start],
       );
+      await recordExport(rows.length);
       sendCsv(
         reply,
         `nexchat-users-${range.key}.csv`,
@@ -876,6 +918,7 @@ export async function registerAdminCoreRoutes(
          WHERE c.started_at >= $1 ORDER BY c.started_at DESC LIMIT 50000`,
         [range.start],
       );
+      await recordExport(rows.length);
       sendCsv(
         reply,
         `nexchat-calls-${range.key}.csv`,
@@ -915,6 +958,7 @@ export async function registerAdminCoreRoutes(
          WHERE c.created_at >= $1 ORDER BY c.created_at DESC LIMIT 50000`,
         [range.start],
       );
+      await recordExport(rows.length);
       sendCsv(
         reply,
         `nexchat-crashes-${range.key}.csv`,
@@ -937,6 +981,7 @@ export async function registerAdminCoreRoutes(
          WHERE l.created_at >= $1 ORDER BY l.created_at DESC LIMIT 50000`,
         [range.start],
       );
+      await recordExport(rows.length, "audit");
       sendCsv(
         reply,
         `nexchat-audit-${range.key}.csv`,

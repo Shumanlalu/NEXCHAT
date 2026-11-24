@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
+import type { PoolClient } from "pg";
 import { z } from "zod";
 import type { AppConfig } from "../config";
 import type { Database } from "../db";
@@ -58,6 +59,36 @@ const adminPatchSchema = z.object({
   role: z.enum(["super_admin", "admin", "analyst", "support"]).optional(),
   active: z.boolean().optional(),
 });
+
+/**
+ * Serialize changes to the last active super admin. A plain count-then-write
+ * check can race when two administrators are demoted/deleted simultaneously;
+ * the settings-row update takes a row lock for the duration of the transaction.
+ */
+async function withSuperAdminGuard<T>(
+  db: Database,
+  fn: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  return db.transaction(async (client) => {
+    await client.query(
+      `INSERT INTO app_settings (key, value, version, updated_by, updated_at)
+       VALUES ('admin_super_admin_guard', $1, 1, NULL, now())
+       ON CONFLICT (key) DO UPDATE
+         SET version = app_settings.version + 1, updated_at = now()`,
+      [JSON.stringify({})],
+    );
+    return fn(client);
+  });
+}
+
+async function activeSuperAdminCount(
+  client: PoolClient,
+): Promise<number> {
+  const row = await client.query<{ count: unknown }>(
+    "SELECT count(*) AS count FROM admin_users WHERE role = 'super_admin' AND active = TRUE",
+  );
+  return Number(row.rows[0]?.count ?? 0);
+}
 
 export async function registerAdminConfigRoutes(
   app: FastifyInstance,
@@ -281,26 +312,26 @@ export async function registerAdminConfigRoutes(
       [id],
     );
     if (!target) throw new HttpError(404, "ADMIN_NOT_FOUND", "Administrator not found");
-    if (
-      target.role === "super_admin" &&
-      (body.role !== undefined && body.role !== "super_admin") ||
-      (target.active && body.active === false && target.role === "super_admin")
-    ) {
-      const count = await db.one<{ count: unknown }>(
-        "SELECT count(*) AS count FROM admin_users WHERE role = 'super_admin' AND active = TRUE",
-      );
-      if (Number(count?.count ?? 0) <= 1) {
-        throw new HttpError(409, "LAST_SUPER_ADMIN", "At least one active super admin is required");
-      }
-    }
     if (id === context.admin.id && body.active === false) {
       throw new HttpError(409, "SELF_DEACTIVATE", "You cannot deactivate your own account");
     }
-    await db.query("UPDATE admin_users SET role = $1, active = $2 WHERE id = $3", [
-      body.role ?? target.role,
-      body.active ?? target.active,
-      id,
-    ]);
+    const nextRole = body.role ?? (target.role as string);
+    const nextActive = body.active ?? Boolean(target.active);
+    await withSuperAdminGuard(db, async (client) => {
+      if (
+        target.role === "super_admin" &&
+        target.active &&
+        (nextRole !== "super_admin" || !nextActive) &&
+        (await activeSuperAdminCount(client)) <= 1
+      ) {
+        throw new HttpError(409, "LAST_SUPER_ADMIN", "At least one active super admin is required");
+      }
+      await client.query("UPDATE admin_users SET role = $1, active = $2 WHERE id = $3", [
+        nextRole,
+        nextActive,
+        id,
+      ]);
+    });
     if (body.active === false) {
       await db.query(
         "UPDATE admin_sessions SET revoked_at = now() WHERE admin_id = $1 AND revoked_at IS NULL",
@@ -308,8 +339,8 @@ export async function registerAdminConfigRoutes(
       );
     }
     await audit(db, context.admin.id, "admin.updated", request, "admin", id, {
-      role: body.role ?? target.role,
-      active: body.active ?? target.active,
+      role: nextRole,
+      active: nextActive,
     });
     return reply.send({ ok: true });
   });
@@ -326,17 +357,19 @@ export async function registerAdminConfigRoutes(
       [id],
     );
     if (!target) throw new HttpError(404, "ADMIN_NOT_FOUND", "Administrator not found");
-    if (target.role === "super_admin" && target.active) {
-      const count = await db.one<{ count: unknown }>(
-        "SELECT count(*) AS count FROM admin_users WHERE role = 'super_admin' AND active = TRUE",
-      );
-      if (Number(count?.count ?? 0) <= 1) {
+    await withSuperAdminGuard(db, async (client) => {
+      if (
+        target.role === "super_admin" &&
+        target.active &&
+        (await activeSuperAdminCount(client)) <= 1
+      ) {
         throw new HttpError(409, "LAST_SUPER_ADMIN", "At least one active super admin is required");
       }
-    }
-    // Sessions cascade and historical rows are detached by the schema, so the
-    // audit trail survives while the account, password hash and TOTP secret do not.
-    await db.query("DELETE FROM admin_users WHERE id = $1", [id]);
+      // Sessions cascade and historical rows are detached by the schema, so
+      // the audit trail survives while the account, password hash and TOTP
+      // secret do not.
+      await client.query("DELETE FROM admin_users WHERE id = $1", [id]);
+    });
     await audit(db, context.admin.id, "admin.deleted", request, "admin", id, {
       username: target.username,
       role: target.role,

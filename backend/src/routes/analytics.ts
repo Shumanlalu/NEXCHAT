@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import { secureEqual } from "../admin/security";
+import { loadRemoteConfig } from "../admin/remote-config";
 import type { AppConfig } from "../config";
 import type { Database } from "../db";
 import { HttpError, requireAuth } from "../http";
@@ -59,6 +61,34 @@ function compactJson(value: Record<string, unknown> | undefined, maxBytes: numbe
   return JSON.stringify({ truncated: true, preview: text.slice(0, maxBytes) });
 }
 
+const SENSITIVE_KEY = /(token|secret|password|authorization|cookie|ciphertext|nex.?id|device.?id|phone|email)/i;
+
+function redactText(value: string): string {
+  return value
+    .replace(/\b[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}\b/g, "[jwt]")
+    .replace(/\bNX-[A-Z2-9]{4}-[A-Z2-9]{4}\b/g, "[nex-id]")
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, "[uuid]")
+    .replace(/\+?\d[\d\s-]{8,}\d/g, "[number]");
+}
+
+function redactValue(value: unknown, depth = 0): unknown {
+  if (depth > 5) return "[redacted]";
+  if (Array.isArray(value)) return value.slice(0, 50).map((item) => redactValue(item, depth + 1));
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        SENSITIVE_KEY.test(key) ? "[redacted]" : redactValue(item, depth + 1),
+      ]),
+    );
+  }
+  return typeof value === "string" ? redactText(value) : value;
+}
+
+function redactedJson(value: Record<string, unknown> | undefined, maxBytes: number): string | null {
+  return compactJson(value ? (redactValue(value) as Record<string, unknown>) : undefined, maxBytes);
+}
+
 const TERMINAL = new Set(["ended", "declined", "missed", "failed"]);
 const RANK: Record<string, number> = {
   ringing: 0,
@@ -111,7 +141,7 @@ export async function registerAnalyticsRoutes(
             event.type,
             event.appVersion ?? null,
             event.platform ?? "android",
-            compactJson(event.metadata, 4096),
+            redactedJson(event.metadata, 4096),
           ],
         );
       }
@@ -136,9 +166,9 @@ export async function registerAnalyticsRoutes(
           auth.device.id,
           body.appVersion ?? null,
           body.platform ?? "android",
-          body.message,
-          body.stack ?? null,
-          compactJson(body.context, 8192),
+          redactText(body.message),
+          body.stack ? redactText(body.stack) : null,
+          redactedJson(body.context, 8192),
         ],
       );
       return reply.code(201).send({ id });
@@ -151,11 +181,23 @@ export async function registerAnalyticsRoutes(
     async (request, reply) => {
       const auth = await requireAuth(request, db, tokens);
       const body = parseWith(callBodySchema, request.body);
+      const remote = await loadRemoteConfig(db).catch(() => null);
+      if (remote && (!remote.callsEnabled || (body.mode === "video" && !remote.videoCallsEnabled))) {
+        throw new HttpError(403, "CALL_DISABLED", "This call type is disabled by the administrator");
+      }
+      if (
+        remote &&
+        body.durationSeconds !== undefined &&
+        body.durationSeconds > remote.maxCallDurationSeconds
+      ) {
+        throw new HttpError(400, "CALL_DURATION_INVALID", "Call duration exceeds the configured limit");
+      }
       if (body.startedAt && new Date(body.startedAt).getTime() > Date.now() + 5 * 60_000) {
         throw new HttpError(400, "CALL_TIME_INVALID", "Call start time is in the future");
       }
       const peer = await db.one<{ id: string }>(
-        "SELECT id FROM users WHERE nex_id = $1 AND deleted_at IS NULL",
+        `SELECT id FROM users WHERE nex_id = $1 AND deleted_at IS NULL
+           AND suspended_at IS NULL AND banned_at IS NULL`,
         [body.peerNexId],
       );
       const callerId = body.role === "caller" ? auth.user.id : peer?.id ?? null;
@@ -261,7 +303,8 @@ export async function registerAnalyticsRoutes(
     const expected = config.cronSecret ?? "";
     if (expected) {
       const header = request.headers.authorization ?? "";
-      if (header !== `Bearer ${expected}`) {
+      const supplied = header.startsWith("Bearer ") ? header.slice(7) : "";
+      if (!secureEqual(supplied, expected)) {
         throw new HttpError(401, "CRON_UNAUTHORIZED", "Cron authentication required");
       }
     } else if (config.env === "production") {

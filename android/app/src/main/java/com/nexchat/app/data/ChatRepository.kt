@@ -39,6 +39,8 @@ import com.nexchat.app.core.network.OutgoingEnvelope
 import com.nexchat.app.core.network.PreKeyDto
 import com.nexchat.app.core.network.RotateKeysRequest
 import com.nexchat.app.core.network.SessionExpiredException
+import com.nexchat.app.core.settings.GroupMetadataWatermark
+import com.nexchat.app.core.settings.GroupMetadataWatermarkStore
 import com.nexchat.app.core.settings.SettingsStore
 import java.io.IOException
 import java.security.MessageDigest
@@ -150,6 +152,7 @@ class ChatRepository(
     private val api: ApiClient,
     private val crypto: SignalCryptoManager,
     private val settings: SettingsStore,
+    private val metadataWatermarks: GroupMetadataWatermarkStore,
 ) {
     private val profileDao = db.profileDao()
     private val contactDao = db.contactDao()
@@ -415,12 +418,15 @@ class ChatRepository(
         withContext(Dispatchers.IO) {
             val message = messageDao.get(messageId) ?: return@withContext
             if (!message.outgoing) return@withContext
+            val profile = profileDao.get() ?: return@withContext
+            if (message.conversationId != conversationId || message.senderNexId != profile.nexId) {
+                return@withContext
+            }
             val trimmed = text.trim()
             if (trimmed.isEmpty()) return@withContext
             val now = System.currentTimeMillis()
-            messageDao.applyEdit(messageId, trimmed, now)
+            messageDao.applyEdit(messageId, trimmed, now, conversationId, profile.nexId, outgoing = true)
             val conversation = conversationDao.get(conversationId) ?: return@withContext
-            val profile = profileDao.get() ?: return@withContext
             val content = baseContent(ContentKind.EDIT, UUID.randomUUID().toString(), profile.toSenderInfo()).copy(
                 targetClientId = messageId,
                 text = trimmed,
@@ -430,18 +436,20 @@ class ChatRepository(
 
     suspend fun deleteMessage(conversationId: String, messageId: String) = withContext(Dispatchers.IO) {
         val message = messageDao.get(messageId) ?: return@withContext
+        if (message.conversationId != conversationId) return@withContext
+        val profile = profileDao.get() ?: return@withContext
         if (!message.outgoing) {
             messageDao.deleteLocally(messageId)
             return@withContext
         }
+        if (message.senderNexId != profile.nexId) return@withContext
         val now = System.currentTimeMillis()
         if (message.kind == MessageKind.ATTACHMENT) {
             attachmentDao.deleteChunks(messageId)
             attachmentDao.delete(messageId)
         }
-        messageDao.applyDeleteForEveryone(messageId, now)
+        messageDao.applyDeleteForEveryone(messageId, now, conversationId, profile.nexId, outgoing = true)
         val conversation = conversationDao.get(conversationId) ?: return@withContext
-        val profile = profileDao.get() ?: return@withContext
         val content = baseContent(ContentKind.DELETE, UUID.randomUUID().toString(), profile.toSenderInfo()).copy(
             targetClientId = messageId,
         )
@@ -1208,25 +1216,41 @@ class ChatRepository(
         val senderNexId = envelope.senderNexId
         upsertSender(senderNexId, content)
         when (content.kind) {
-            ContentKind.TEXT -> handleIncomingText(envelope, content, senderNexId)
-            ContentKind.EDIT -> content.targetClientId?.let {
+            ContentKind.TEXT -> {
+                if (envelopeGroupMatches(content, envelope)) {
+                    handleIncomingText(envelope, content, senderNexId)
+                }
+            }
+            ContentKind.EDIT -> {
+                val target = ownedIncomingTarget(envelope, content) ?: return
                 messageDao.applyEdit(
-                    it,
+                    target.id,
                     content.text.orEmpty(),
                     content.timestamp.takeIf { time -> time > 0 } ?: System.currentTimeMillis(),
+                    target.conversationId,
+                    senderNexId,
+                    outgoing = false,
                 )
             }
-            ContentKind.DELETE -> content.targetClientId?.let { id ->
-                if (messageDao.get(id)?.kind == MessageKind.ATTACHMENT) {
-                    attachmentDao.deleteChunks(id)
-                    attachmentDao.delete(id)
+            ContentKind.DELETE -> {
+                val target = ownedIncomingTarget(envelope, content) ?: return
+                if (target.kind == MessageKind.ATTACHMENT) {
+                    attachmentDao.deleteChunks(target.id)
+                    attachmentDao.delete(target.id)
                 }
                 messageDao.applyDeleteForEveryone(
-                    id,
+                    target.id,
                     content.timestamp.takeIf { time -> time > 0 } ?: System.currentTimeMillis(),
+                    target.conversationId,
+                    senderNexId,
+                    outgoing = false,
                 )
             }
-            ContentKind.REACTION -> handleReaction(content, senderNexId)
+            ContentKind.REACTION -> {
+                if (envelopeGroupMatches(content, envelope)) {
+                    handleReaction(content, senderNexId, conversationIdFor(envelope))
+                }
+            }
             ContentKind.READ -> {
                 if (settings.state.value.readReceipts) {
                     val ids = content.readClientIds
@@ -1241,8 +1265,16 @@ class ChatRepository(
                     ),
                 )
             }
-            ContentKind.GROUP_META -> handleGroupMeta(content, senderNexId)
-            ContentKind.ATTACHMENT_MANIFEST -> handleIncomingAttachmentManifest(envelope, content, senderNexId)
+            ContentKind.GROUP_META -> {
+                if (envelopeGroupMatches(content, envelope)) {
+                    handleGroupMeta(envelope, content, senderNexId)
+                }
+            }
+            ContentKind.ATTACHMENT_MANIFEST -> {
+                if (envelopeGroupMatches(content, envelope)) {
+                    handleIncomingAttachmentManifest(envelope, content, senderNexId)
+                }
+            }
             ContentKind.ATTACHMENT_CHUNK -> handleIncomingAttachmentChunk(content)
             ContentKind.CALL_OFFER -> emitCallSignal(envelope, content) { cid, callId, sentAt ->
                 content.sdp?.let {
@@ -1304,6 +1336,36 @@ class ChatRepository(
                 )
             }
         }
+    }
+
+    /** The relay's group routing is authoritative; payload self-assertions are not. */
+    private fun envelopeGroupMatches(content: SecureContent, envelope: EnvelopeDto): Boolean =
+        content.groupId == envelope.groupId
+
+    /**
+     * EDIT/DELETE may only touch a message that was originally received from
+     * this exact sender in this exact conversation. Local outgoing rows and
+     * messages routed through another conversation are never valid targets.
+     */
+    private suspend fun ownedIncomingTarget(
+        envelope: EnvelopeDto,
+        content: SecureContent,
+    ): MessageEntity? {
+        if (!envelopeGroupMatches(content, envelope)) return null
+        val targetId = content.targetClientId?.takeIf { it.isNotBlank() } ?: return null
+        val conversationId = conversationIdFor(envelope)
+        if (envelope.groupId != null &&
+            groupDao.getMembers(envelope.groupId).none { it.nexId == envelope.senderNexId }
+        ) {
+            return null
+        }
+        val message = messageDao.get(targetId) ?: return null
+        if (message.conversationId != conversationId || message.outgoing ||
+            message.senderNexId != envelope.senderNexId
+        ) {
+            return null
+        }
+        return message
     }
 
     private suspend fun emitCallSignal(
@@ -1543,6 +1605,9 @@ class ChatRepository(
         content: SecureContent,
         senderNexId: String,
     ): ConversationEntity {
+        if (!envelopeGroupMatches(content, envelope)) {
+            throw CryptoException("Group id does not match the relay envelope")
+        }
         if (content.groupId != null) {
             val existing = groupDao.get(content.groupId)
             if (existing == null) {
@@ -1588,10 +1653,15 @@ class ChatRepository(
     private fun conversationIdFor(envelope: EnvelopeDto): String =
         envelope.groupId?.let { "group:$it" } ?: "dm:${envelope.senderNexId}"
 
-    private suspend fun handleReaction(content: SecureContent, senderNexId: String) {
+    private suspend fun handleReaction(
+        content: SecureContent,
+        senderNexId: String,
+        conversationId: String,
+    ) {
         val target = content.targetClientId ?: return
         val emoji = content.emoji ?: return
         val existing = messageDao.get(target) ?: return
+        if (existing.conversationId != conversationId) return
         val map = parseReactions(existing.reactionsJson).toMutableMap()
         val from = senderNexId
         map.keys.toList().forEach { key ->
@@ -1637,8 +1707,20 @@ class ChatRepository(
         }
     }
 
-    private suspend fun handleGroupMeta(content: SecureContent, senderNexId: String) {
+    private suspend fun handleGroupMeta(
+        envelope: EnvelopeDto,
+        content: SecureContent,
+        senderNexId: String,
+    ) {
         val groupId = content.groupId ?: return
+        if (!envelopeGroupMatches(content, envelope)) return
+        // Order by the relay's arrival time and the envelope/client id, never
+        // by the sender's self-asserted content timestamp.
+        val timestamp = parseTimestamp(envelope.createdAt) ?: 0L
+        val watermarkId = content.clientId?.takeIf { it.isNotBlank() } ?: envelope.clientId
+        val watermark = GroupMetadataWatermark(timestamp, watermarkId)
+        if (!metadataWatermarks.shouldApply(groupId, watermark)) return
+        if (groupDao.getMembers(groupId).none { it.nexId == senderNexId }) return
         val now = System.currentTimeMillis()
         val existing = groupDao.get(groupId)
         groupDao.upsert(
@@ -1687,6 +1769,7 @@ class ChatRepository(
         } else if (conversation.title != title) {
             conversationDao.upsert(conversation.copy(title = title, updatedAt = now))
         }
+        metadataWatermarks.markApplied(groupId, watermark)
     }
 
     suspend fun createGroup(title: String, members: List<ContactEntity>): ConversationEntity =

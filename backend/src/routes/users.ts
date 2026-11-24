@@ -4,6 +4,7 @@ import type { Database } from "../db";
 import { HttpError, requireAuth, type DeviceRow, type UserRow } from "../http";
 import { publicUser } from "../security/ids";
 import type { TokenService } from "../security/tokens";
+import type { WsHub } from "../ws/hub";
 import { parseWith, rotateKeysSchema, signalDeviceIdSchema, updateProfileSchema } from "../validation";
 import { resolveSignalDeviceId } from "./auth";
 
@@ -11,11 +12,13 @@ interface Deps {
   db: Database;
   tokens: TokenService;
   config: AppConfig;
+  hub: WsHub;
 }
 
 async function getTargetUser(db: Database, nexId: string): Promise<UserRow> {
   const user = await db.one<UserRow>(
-    "SELECT * FROM users WHERE nex_id = $1 AND deleted_at IS NULL",
+    `SELECT * FROM users WHERE nex_id = $1 AND deleted_at IS NULL
+       AND suspended_at IS NULL AND banned_at IS NULL`,
     [nexId],
   );
   if (!user) throw new HttpError(404, "USER_NOT_FOUND", "No NEXCHAT user has that NEX ID");
@@ -23,7 +26,7 @@ async function getTargetUser(db: Database, nexId: string): Promise<UserRow> {
 }
 
 export async function registerUserRoutes(app: FastifyInstance, deps: Deps): Promise<void> {
-  const { db, tokens } = deps;
+  const { db, tokens, hub } = deps;
 
   app.get("/v1/me", async (request, reply) => {
     const auth = await requireAuth(request, db, tokens);
@@ -78,9 +81,11 @@ export async function registerUserRoutes(app: FastifyInstance, deps: Deps): Prom
     const looksLikeNex = normalized.toUpperCase().startsWith("NX-");
     const rows = await db.query<UserRow>(
       looksLikeNex
-        ? "SELECT * FROM users WHERE nex_id = $1 AND deleted_at IS NULL LIMIT 1"
+        ? `SELECT * FROM users WHERE nex_id = $1 AND deleted_at IS NULL
+             AND suspended_at IS NULL AND banned_at IS NULL LIMIT 1`
         : `SELECT * FROM users
-           WHERE deleted_at IS NULL AND (username LIKE $1 ESCAPE '\\' OR display_name ILIKE $2 ESCAPE '\\')
+           WHERE deleted_at IS NULL AND suspended_at IS NULL AND banned_at IS NULL
+             AND (username LIKE $1 ESCAPE '\\' OR display_name ILIKE $2 ESCAPE '\\')
            ORDER BY username LIMIT 20`,
       looksLikeNex
         ? [normalized.toUpperCase()]
@@ -139,6 +144,9 @@ export async function registerUserRoutes(app: FastifyInstance, deps: Deps): Prom
     await db.query("DELETE FROM one_time_prekeys WHERE device_id = $1", [deviceId]);
     await db.query("DELETE FROM kyber_prekeys WHERE device_id = $1", [deviceId]);
     await db.query("DELETE FROM envelopes WHERE recipient_device_id = $1", [deviceId]);
+    // The refresh token is gone, but a socket authenticated before revocation
+    // can otherwise stay open until its access token expires.
+    hub.closeDevice(deviceId, 4001, "device revoked");
     return reply.send({ ok: true });
   });
 

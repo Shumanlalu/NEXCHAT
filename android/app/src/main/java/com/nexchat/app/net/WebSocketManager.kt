@@ -10,7 +10,6 @@ import com.nexchat.app.core.network.ApiClient
 import com.nexchat.app.core.network.ApiException
 import com.nexchat.app.core.network.EnvelopeDto
 import com.nexchat.app.core.network.NexJson
-import com.nexchat.app.core.network.SessionExpiredException
 import com.nexchat.app.data.AuthRepository
 import com.nexchat.app.data.ChatRepository
 import java.util.concurrent.atomic.AtomicBoolean
@@ -213,7 +212,7 @@ class WebSocketManager(
         val token = api.currentAccessToken()
         if (token.isNullOrBlank()) {
             closed.complete(Unit)
-            auth.sessionExpired()
+            api.dispatchSessionRevocation()
             return closed
         }
         val request = try {
@@ -258,11 +257,16 @@ class WebSocketManager(
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 socket = null
-                if (code == 4401 || code == 4403) {
-                    scope.launch {
-                        val refreshed = runCatching { api.refreshSession() }.isSuccess
-                        if (!refreshed) auth.sessionExpired()
+                when (WsClosePolicy.action(code)) {
+                    WsCloseAction.INVALIDATE -> api.dispatchSessionRevocation()
+                    WsCloseAction.REFRESH_THEN_INVALIDATE -> scope.launch {
+                        // refreshSession() already dispatches on failure; the
+                        // extra dispatch is a no-op through the central guard.
+                        if (!runCatching { api.refreshSession() }.isSuccess) {
+                            api.dispatchSessionRevocation()
+                        }
                     }
+                    WsCloseAction.RECONNECT -> Unit
                 }
                 if (!closed.isCompleted) closed.complete(Unit)
             }

@@ -69,10 +69,15 @@ async function insertDevice(
     device.signalDeviceId,
     device.deviceId,
   );
-  const existing = await db.one<{ id: string; user_id: string }>(
-    "SELECT id, user_id FROM devices WHERE id = $1",
+  const existing = await db.one<{ id: string; user_id: string; revoked_at: Date | string | null }>(
+    "SELECT id, user_id, revoked_at FROM devices WHERE id = $1",
     [device.deviceId],
   );
+  // Revocation is durable: a revoked UUID must never be revived by a later
+  // login. Reinstalling requires a newly generated device ID.
+  if (existing?.revoked_at) {
+    throw Object.assign(new Error("device revoked"), { code: "23505" });
+  }
   if (existing && (!allowReplace || existing.user_id !== userId)) {
     throw Object.assign(new Error("device already registered"), { code: "23505" });
   }
@@ -86,7 +91,7 @@ async function insertDevice(
            identity_key = $6, signed_pre_key_id = $7, signed_pre_key_public = $8,
            signed_pre_key_signature = $9, kyber_pre_key_id = $10,
            kyber_pre_key_public = $11, kyber_pre_key_signature = $12,
-           revoked_at = NULL, last_seen_at = now()
+           last_seen_at = now()
          WHERE id = $1`,
         [
           device.deviceId,
@@ -279,6 +284,13 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): 
       await hashPassword(body.password);
       throw new HttpError(401, "INVALID_CREDENTIALS", "Incorrect username or password");
     }
+    if (user.banned_at) {
+      throw new HttpError(
+        403,
+        "ACCOUNT_BANNED",
+        user.banned_reason ? `This account is banned: ${user.banned_reason}` : "This account is banned",
+      );
+    }
     if (user.suspended_at) {
       throw new HttpError(403, "ACCOUNT_SUSPENDED", "This account is suspended");
     }
@@ -331,11 +343,28 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): 
     if (!row || row.revoked_at || new Date(row.expires_at).getTime() <= Date.now()) {
       throw new HttpError(401, "INVALID_REFRESH_TOKEN", "Refresh token is invalid or expired");
     }
+    // Consume atomically. Two concurrent refreshes may both read the row, but
+    // only the first conditional update can succeed.
+    const consumed = await db.one<{ id: string }>(
+      `UPDATE refresh_tokens SET revoked_at = now()
+       WHERE id = $1 AND revoked_at IS NULL RETURNING id`,
+      [row.id],
+    );
+    if (!consumed) {
+      throw new HttpError(401, "INVALID_REFRESH_TOKEN", "Refresh token is invalid or expired");
+    }
 
     const user = await db.one<UserRow>(
       "SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL",
       [row.user_id],
     );
+    if (user?.banned_at) {
+      throw new HttpError(
+        403,
+        "ACCOUNT_BANNED",
+        user.banned_reason ? `This account is banned: ${user.banned_reason}` : "This account is banned",
+      );
+    }
     if (user?.suspended_at) {
       throw new HttpError(403, "ACCOUNT_SUSPENDED", "This account is suspended");
     }
@@ -347,7 +376,6 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): 
       throw new HttpError(401, "SESSION_REVOKED", "This session has been revoked");
     }
 
-    await db.query("UPDATE refresh_tokens SET revoked_at = now() WHERE id = $1", [row.id]);
     const session = await issueSession(db, tokens, user, device);
     return reply.send(session);
   });
@@ -401,16 +429,18 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): 
     return reply.send({ ok: true });
   });
 
-  app.post("/v1/auth/check-username", async (request, reply) => {
-    const body = request.body as { username?: unknown };
-    const schema = registerSchema.shape.username;
-    const username = parseWith(schema, body?.username);
-    const existing = await db.one<{ id: string }>(
-      "SELECT id FROM users WHERE username = $1",
-      [username],
-    );
-    return reply.send({ available: !existing });
-  });
+  app.post(
+    "/v1/auth/check-username",
+    { config: { rateLimit: { max: 20, timeWindow: "15 minutes" } } },
+    async (request, reply) => {
+      const body = request.body as { username?: unknown };
+      const schema = registerSchema.shape.username;
+      // Validate the shape but do not disclose registration state. The
+      // registration endpoint remains the authoritative uniqueness check.
+      parseWith(schema, body?.username);
+      return reply.send({ available: true });
+    },
+  );
 }
 
 export { insertDevice, issueSession, publicProfile, resolveSignalDeviceId };

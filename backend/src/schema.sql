@@ -138,6 +138,11 @@ CREATE TABLE IF NOT EXISTS abuse_reports (
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS suspended_at TIMESTAMPTZ;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS suspended_reason TEXT;
+-- A ban is an administrative account-level block that cannot be undone by the
+-- normal "restore" action. It is deliberately separate from suspension so an
+-- operator can distinguish a temporary pause from an enforcement action.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS banned_at TIMESTAMPTZ;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS banned_reason TEXT;
 CREATE INDEX IF NOT EXISTS users_created_idx ON users(created_at);
 CREATE INDEX IF NOT EXISTS devices_last_seen_idx ON devices(last_seen_at);
 

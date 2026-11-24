@@ -6,6 +6,7 @@ import com.nexchat.app.core.settings.SettingsStore
 import java.io.IOException
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -44,6 +45,30 @@ class ApiClient(
     private val json = NexJson
     private val refreshMutex = Mutex()
     private val mediaType = "application/json; charset=utf-8".toMediaType()
+
+    @Volatile
+    private var sessionInvalidationHandler: (() -> Unit)? = null
+    private val revocationGuard = AtomicBoolean(false)
+
+    /** Wired once from AppContainer after the auth repository exists. */
+    fun setSessionInvalidationHandler(handler: () -> Unit) {
+        sessionInvalidationHandler = handler
+    }
+
+    /** A fresh sign-in makes the next revocation dispatchable again. */
+    fun resetSessionRevocation() {
+        revocationGuard.set(false)
+    }
+
+    /** Invokes the central invalidation path at most once per session. */
+    fun dispatchSessionRevocation() {
+        if (revocationGuard.compareAndSet(false, true)) {
+            sessionInvalidationHandler?.invoke()
+        }
+    }
+
+    private fun errorCode(body: String): String? =
+        runCatching { json.decodeFromString<ApiErrorBody>(body).error.code }.getOrNull()
 
     val httpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
@@ -89,9 +114,16 @@ class ApiClient(
         val refreshToken = tokens.refreshToken
         if (refreshToken.isNullOrBlank()) {
             tokens.clearTokens()
+            dispatchSessionRevocation()
             throw SessionExpiredException()
         }
-        val response = refresh(refreshToken)
+        val response = try {
+            refresh(refreshToken)
+        } catch (error: Exception) {
+            tokens.clearTokens()
+            dispatchSessionRevocation()
+            throw error
+        }
         tokens.saveTokens(response.token, response.refreshToken)
         response.token
     }
@@ -304,6 +336,15 @@ class ApiClient(
     ): String {
         val accessBefore = tokens.accessToken
         var response = perform(method, path, body, authenticated = true, accessOverride = accessBefore)
+        // Inspect the relay's first error before spending the refresh token.
+        // Policy denials and bad credentials are not session revocations.
+        if (response.first == 401 || response.first == 403) {
+            val code = errorCode(response.second)
+            if (SessionRevocation.isRevocation(response.first, code)) {
+                dispatchSessionRevocation()
+                throw SessionExpiredException()
+            }
+        }
         if (response.first == 401) {
             refreshTokensIfNeeded(accessBefore)
             response = perform(method, path, body, authenticated = true)
@@ -345,6 +386,7 @@ class ApiClient(
         val refreshToken = tokens.refreshToken
         if (refreshToken.isNullOrBlank()) {
             tokens.clearTokens()
+            dispatchSessionRevocation()
             throw SessionExpiredException()
         }
         val (status, body) = perform(
@@ -355,15 +397,26 @@ class ApiClient(
         )
         if (status !in 200..299) {
             tokens.clearTokens()
+            dispatchSessionRevocation()
             throw SessionExpiredException()
         }
-        val response = decode<RefreshResponse>(status to body)
+        val response = try {
+            decode<RefreshResponse>(status to body)
+        } catch (error: Exception) {
+            tokens.clearTokens()
+            dispatchSessionRevocation()
+            throw SessionExpiredException()
+        }
         tokens.saveTokens(response.token, response.refreshToken)
     }
 
     private fun requireSuccess(response: Pair<Int, String>): String {
         if (response.first in 200..299) return response.second.ifBlank { "{}" }
         val parsed = runCatching { json.decodeFromString<ApiErrorBody>(response.second) }.getOrNull()
+        if (SessionRevocation.isRevocation(response.first, parsed?.error?.code)) {
+            dispatchSessionRevocation()
+            throw SessionExpiredException()
+        }
         if (response.first == 401) {
             throw SessionExpiredException()
         }

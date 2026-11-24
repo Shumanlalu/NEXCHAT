@@ -126,7 +126,14 @@ export function parseCookies(header: string | undefined): Record<string, string>
     if (index < 0) continue;
     const name = part.slice(0, index).trim();
     const value = part.slice(index + 1).trim();
-    if (name) result[name] = decodeURIComponent(value);
+    if (!name) continue;
+    try {
+      result[name] = decodeURIComponent(value);
+    } catch {
+      // A malformed cookie is attacker-controlled input, not a server error.
+      // Ignore it so authentication fails closed without returning a 500.
+      continue;
+    }
   }
   return result;
 }
@@ -170,7 +177,10 @@ export function verifyCsrf(request: FastifyRequest, context: AdminContext, confi
   // The cookie itself is SameSite=Strict; Origin is checked as defence in depth.
   const origin = request.headers.origin;
   if (origin) {
-    const host = request.headers["x-forwarded-host"] ?? request.headers.host;
+    // Fastify's request.host comes from the validated Host header. Trusting a
+    // client-supplied X-Forwarded-Host here would weaken this defence when the
+    // proxy is not explicitly trusted.
+    const host = request.headers.host;
     const sameOrigin = host ? `${request.protocol}://${host}` : config.corsOrigin;
     const allowed = new Set([
       sameOrigin.replace(/\/$/, ""),
@@ -256,7 +266,9 @@ export async function audit(
         (request?.headers["user-agent"] ?? "").slice(0, 300) || null,
       ],
     )
-    .catch(() => undefined);
+    .catch((error: unknown) => {
+      request?.log.error({ err: error, action }, "audit log write failed");
+    });
 }
 
 // ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@ import com.nexchat.app.core.network.PreKeyDto
 import com.nexchat.app.core.network.RegisterRequest
 import com.nexchat.app.core.security.SecureSessionStore
 import com.nexchat.app.core.settings.SettingsStore
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -40,10 +41,14 @@ class AuthRepository(
     private val _state = MutableStateFlow<AuthState>(AuthState.Loading)
     val state: StateFlow<AuthState> = _state.asStateFlow()
 
+    // One invalidation per signed-in session. Successful auth resets it.
+    private val invalidationGuard = AtomicBoolean(false)
+
     suspend fun bootstrap() = withContext(Dispatchers.IO) {
         val local = profileDao.get()
         if (!tokens.isLoggedIn) {
             if (local != null) wipeLocalAccountData()
+            invalidationGuard.set(true)
             _state.value = AuthState.LoggedOut
             return@withContext
         }
@@ -66,10 +71,12 @@ class AuthRepository(
                 createdAt = System.currentTimeMillis(),
             )
             profileDao.upsert(profile)
+            invalidationGuard.set(false)
             _state.value = AuthState.LoggedIn(profile)
         } catch (error: Exception) {
             if (local == null) {
                 tokens.clearTokens()
+                invalidationGuard.set(true)
                 _state.value = AuthState.LoggedOut
             }
         }
@@ -185,11 +192,13 @@ class AuthRepository(
             createdAt = System.currentTimeMillis(),
         )
         profileDao.upsert(profile)
+        invalidationGuard.set(false)
         _state.value = AuthState.LoggedIn(profile)
     }
 
     suspend fun logout() = withContext(Dispatchers.IO) {
         runCatching { api.logout(tokens.refreshToken) }
+        invalidationGuard.set(true)
         tokens.clearTokens()
         wipeLocalAccountData()
         _state.value = AuthState.LoggedOut
@@ -260,18 +269,28 @@ class AuthRepository(
 
     suspend fun deleteAccount(password: String) = withContext(Dispatchers.IO) {
         api.deleteAccount(password)
+        invalidationGuard.set(true)
         tokens.clearTokens()
         wipeLocalAccountData()
         _state.value = AuthState.LoggedOut
     }
 
-    fun sessionExpired() {
+    /**
+     * Single entry point for every path that decides a session can no longer
+     * be used (HTTP revocation, WebSocket close, missing token, explicit sign
+     * out). Concurrent callers collapse into one wipe.
+     */
+    fun invalidateSession() {
+        if (!invalidationGuard.compareAndSet(false, true)) return
         scope.launch(Dispatchers.IO) {
             tokens.clearTokens()
             wipeLocalAccountData()
             _state.value = AuthState.LoggedOut
         }
     }
+
+    /** Kept for source compatibility with older call sites. */
+    fun sessionExpired() = invalidateSession()
 
     private fun androidDeviceName(): String {
         val manufacturer = android.os.Build.MANUFACTURER.orEmpty()

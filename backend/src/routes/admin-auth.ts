@@ -109,31 +109,78 @@ async function adminCount(db: Database): Promise<number> {
   return Number(row?.count ?? 0);
 }
 
+// A deterministic primary key makes overlapping first-run setup attempts
+// collide even on databases that do not fully isolate concurrent transactions.
+// This identifier is not secret; the app_settings claim is the primary guard.
+const FIRST_ADMIN_ID = "00000000-0000-4000-8000-000000000001";
+
+function adminInsertValues(
+  config: AppConfig,
+  input: AdminCreateInput,
+  id = randomUUID(),
+): { id: string; values: unknown[] } {
+  // The column stays NOT NULL for schema compatibility, but sign-in no
+  // longer requires a second factor.
+  const unusedSecret = generateTotpSecret();
+  // Hash calculation is intentionally performed outside the caller's
+  // transaction. Only the derived value crosses the transaction boundary.
+  return {
+    id,
+    values: [input.email, input.displayName, input.role, encryptTotpSecret(unusedSecret, config)],
+  };
+}
+
 async function insertAdmin(
   db: Database,
   config: AppConfig,
   input: AdminCreateInput,
 ): Promise<string> {
   const { hash, salt } = await hashPassword(input.password);
-  // The column stays NOT NULL for schema compatibility, but sign-in no
-  // longer requires a second factor.
-  const unusedSecret = generateTotpSecret();
-  const id = randomUUID();
+  const { id, values } = adminInsertValues(config, input);
   await db.query(
     `INSERT INTO admin_users
        (id, username, display_name, password_hash, password_salt, totp_secret_enc, role)
      VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-    [
-      id,
-      input.email,
-      input.displayName,
-      hash,
-      salt,
-      encryptTotpSecret(unusedSecret, config),
-      input.role,
-    ],
+    [id, input.email, values[1], hash, salt, values[3], values[2]],
   );
   return id;
+}
+
+/**
+ * Claim the one-time setup slot atomically. The count check in the route is a
+ * fast path; this claim is what prevents two concurrent cold starts from both
+ * creating a super admin.
+ */
+async function insertFirstAdminAtomically(
+  db: Database,
+  config: AppConfig,
+  input: AdminCreateInput,
+): Promise<string | null> {
+  const { hash, salt } = await hashPassword(input.password);
+  const { id, values } = adminInsertValues(config, input, FIRST_ADMIN_ID);
+  try {
+    return await db.transaction(async (client) => {
+      const claim = await client.query(
+        `INSERT INTO app_settings (key, value, version, updated_by, updated_at)
+         VALUES ('admin_setup_claim', $1, 1, NULL, now())
+         ON CONFLICT (key) DO NOTHING`,
+        [JSON.stringify({ adminId: id })],
+      );
+      if (claim.rowCount !== 1) return null;
+      await client.query(
+        `INSERT INTO admin_users
+           (id, username, display_name, password_hash, password_salt, totp_secret_enc, role)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [id, values[0], values[1], hash, salt, values[3], values[2]],
+      );
+      return id;
+    });
+  } catch (error) {
+    // A duplicate-key failure here means another overlapping setup request won
+    // the race. Treat it as a closed setup instead of leaking a 500.
+    if ((error as { code?: string }).code === "23505") return null;
+    throw error;
+  }
 }
 
 function setSessionCookie(reply: FastifyReply, token: string, maxAgeSeconds: number): void {
@@ -146,11 +193,26 @@ function suppliedHeaderToken(request: FastifyRequest): string | undefined {
 }
 
 async function recordLockout(db: Database, admin: AdminRow): Promise<void> {
-  const attempts = admin.failed_attempts + 1;
+  // Once the lockout window has elapsed the counter must start over. Otherwise
+  // a single wrong password immediately re-locks the account indefinitely.
+  const expired =
+    admin.locked_until && new Date(admin.locked_until).getTime() <= Date.now();
+  const previous = expired ? 0 : admin.failed_attempts;
+  const attempts = previous + 1;
   const lockedUntil = attempts >= 5 ? new Date(Date.now() + 15 * 60 * 1000) : null;
   await db.query(
     `UPDATE admin_users SET failed_attempts = $1, locked_until = $2 WHERE id = $3`,
     [attempts, lockedUntil, admin.id],
+  );
+}
+
+async function invalidatePendingResets(db: Database, adminId: string): Promise<void> {
+  // A successful reset or password change invalidates every other outstanding
+  // one-time token for the same administrator.
+  await db.query(
+    `UPDATE admin_password_resets SET used_at = now()
+     WHERE admin_id = $1 AND used_at IS NULL`,
+    [adminId],
   );
 }
 
@@ -199,12 +261,15 @@ export async function registerAdminAuthRoutes(
       const body = parseWith(setupBody, request.body);
       const passwordError = validatePassword(body.password, 12);
       if (passwordError) throw new HttpError(400, "WEAK_PASSWORD", passwordError);
-      const id = await insertAdmin(db, config, {
+      const id = await insertFirstAdminAtomically(db, config, {
         email: body.email,
         displayName: body.displayName,
         password: body.password,
         role: "super_admin",
       });
+      if (!id) {
+        throw new HttpError(409, "SETUP_CLOSED", "An administrator already exists");
+      }
       await audit(db, id, "admin.setup.completed", request, "admin", id, {
         email: body.email,
       });
@@ -384,6 +449,7 @@ export async function registerAdminAuthRoutes(
          WHERE admin_id = $1 AND revoked_at IS NULL`,
         [row.admin_id],
       );
+      await invalidatePendingResets(db, row.admin_id);
       await audit(db, row.admin_id, "admin.password_reset.completed", request, "admin", row.admin_id);
       return reply.send({ ok: true });
     },
@@ -434,12 +500,16 @@ export async function registerAdminAuthRoutes(
        WHERE admin_id = $1 AND id <> $2 AND revoked_at IS NULL`,
       [context.admin.id, context.sessionId],
     );
+    await invalidatePendingResets(db, context.admin.id);
     await audit(db, context.admin.id, "admin.password.changed", request, "admin", context.admin.id);
     return reply.send({ ok: true });
   });
 
-  // Remove an expired cookie left over from an old session.
+  // Remove an expired cookie left over from an old session. This is still a
+  // state-changing endpoint, so it uses the same guards as every other mutation.
   app.delete("/v1/admin/auth/session", async (request, reply) => {
+    const context = await requireAdmin(request, db, config);
+    verifyCsrf(request, context, config);
     const cookie = parseCookies(request.headers.cookie);
     if (cookie.nexchat_admin_session) setSessionCookie(reply, "", 0);
     return reply.send({ ok: true });

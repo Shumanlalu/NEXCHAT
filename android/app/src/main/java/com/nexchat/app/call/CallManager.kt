@@ -12,12 +12,14 @@ import android.os.Looper
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.content.ContextCompat
+import com.nexchat.app.BuildConfig
 import com.nexchat.app.core.config.RemoteConfigStore
 import com.nexchat.app.core.crypto.ContentKind
 import com.nexchat.app.core.crypto.SecureContent
 import com.nexchat.app.core.db.CallHistoryEntity
 import com.nexchat.app.core.network.ApiClient
 import com.nexchat.app.core.network.IceServerDto
+import com.nexchat.app.core.security.LogRedactor
 import com.nexchat.app.core.telemetry.Telemetry
 import com.nexchat.app.data.CallSignalEvent
 import com.nexchat.app.data.ChatRepository
@@ -172,6 +174,9 @@ class CallManager(
     ) {
         if (!remoteConfig.callsEnabled()) {
             throw IllegalStateException("Calling is temporarily unavailable")
+        }
+        if (video && !remoteConfig.videoCallsEnabled()) {
+            throw IllegalStateException("Video calls are temporarily unavailable")
         }
         if (!hasMicrophonePermission()) {
             throw IllegalStateException("Microphone permission is required for calls")
@@ -343,6 +348,7 @@ class CallManager(
 
     /** Enable or disable the local camera without renegotiating the call. */
     fun setCameraEnabled(enabled: Boolean) {
+        if (enabled && !remoteConfig.videoCallsEnabled()) return
         val updated = synchronized(lock) {
             val current = _state.value ?: return
             if (!current.video || current.status == CallStatus.ENDED ||
@@ -568,6 +574,12 @@ class CallManager(
             sendCallsDisabledReject(event)
             return@withContext
         }
+        val videoCall = event.video && event.sdp.contains("m=video")
+        if (videoCall && !remoteConfig.videoCallsEnabled()) {
+            log("offer rejected call=${short(event.callId)} video calls disabled")
+            sendCallsDisabledReject(event)
+            return@withContext
+        }
         if (!event.sdp.startsWith("v=") || !event.sdp.contains("m=audio")) {
             log("offer ignored call=${short(event.callId)} malformed sdp")
             return@withContext
@@ -594,7 +606,6 @@ class CallManager(
         val peerName = conversation?.title?.takeIf { it.isNotBlank() }
             ?: event.displayName?.takeIf { it.isNotBlank() }
             ?: event.fromNexId
-        val videoCall = event.video && event.sdp.contains("m=video")
         val call = CallUiState(
             callId = event.callId,
             conversationId = conversation?.id ?: event.conversationId,
@@ -1752,7 +1763,11 @@ class CallManager(
     }
 
     private fun log(message: String) {
-        Log.i(TAG, message)
+        if (BuildConfig.DEBUG) {
+            Log.i(TAG, LogRedactor.redact(message))
+        } else {
+            Log.i(TAG, "call event: <redacted>")
+        }
     }
 
     private fun short(id: String): String = id.take(8)

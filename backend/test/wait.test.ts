@@ -217,9 +217,9 @@ describe("long-poll delivery", () => {
     await drainBob();
     const ordinaryClientId = randomUUID();
     const callClientId = randomUUID();
-    for (const [clientId, priority] of [
-      [ordinaryClientId, false],
-      [callClientId, true],
+    for (const [clientId, priority, expiresInSeconds] of [
+      [ordinaryClientId, false, undefined],
+      [callClientId, true, 30],
     ] as const) {
       const response = await app.inject({
         method: "POST",
@@ -234,6 +234,7 @@ describe("long-poll delivery", () => {
               ciphertext: "AAAA",
               cipherType: 3,
               priority,
+              expiresInSeconds,
             },
           ],
         },
@@ -247,6 +248,43 @@ describe("long-poll delivery", () => {
     });
     const messages = (pending.json() as { messages: Array<{ clientId: string }> }).messages;
     assert.equal(messages[0]?.clientId, callClientId);
+  });
+
+  it("does not let long-lived messages claim signaling priority", async () => {
+    await drainBob();
+    const longLivedClientId = randomUUID();
+    const shortLivedClientId = randomUUID();
+    for (const [clientId, expiresInSeconds] of [
+      [longLivedClientId, undefined],
+      [shortLivedClientId, 30],
+    ] as const) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/messages",
+        headers: authHeader(aliceToken),
+        payload: {
+          messages: [
+            {
+              recipientNexId: BOB_NEX_ID,
+              recipientSignalDeviceId: 1,
+              clientId,
+              ciphertext: "AAAA",
+              cipherType: 3,
+              priority: true,
+              expiresInSeconds,
+            },
+          ],
+        },
+      });
+      assert.equal(response.statusCode, 202);
+    }
+    const pending = await app.inject({
+      method: "GET",
+      url: "/v1/messages/pending",
+      headers: authHeader(bobToken),
+    });
+    const messages = (pending.json() as { messages: Array<{ clientId: string }> }).messages;
+    assert.equal(messages[0]?.clientId, shortLivedClientId);
   });
 
   it("records simultaneous caller and callee call reports without a duplicate-key failure", async () => {

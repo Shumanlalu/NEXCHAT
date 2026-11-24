@@ -179,11 +179,32 @@ interface MessageDao {
     @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY sentAt DESC LIMIT :limit")
     suspend fun latest(conversationId: String, limit: Int): List<MessageEntity>
 
-    @Query("UPDATE messages SET body = :body, editedAt = :at WHERE id = :id")
-    suspend fun applyEdit(id: String, body: String, at: Long)
+    @Query(
+        """UPDATE messages SET body = :body, editedAt = :at
+           WHERE id = :id AND conversationId = :conversationId
+             AND senderNexId = :senderNexId AND outgoing = :outgoing""",
+    )
+    suspend fun applyEdit(
+        id: String,
+        body: String,
+        at: Long,
+        conversationId: String,
+        senderNexId: String,
+        outgoing: Boolean,
+    )
 
-    @Query("UPDATE messages SET deletedForEveryone = 1, body = '', editedAt = :at WHERE id = :id")
-    suspend fun applyDeleteForEveryone(id: String, at: Long)
+    @Query(
+        """UPDATE messages SET deletedForEveryone = 1, body = '', editedAt = :at
+           WHERE id = :id AND conversationId = :conversationId
+             AND senderNexId = :senderNexId AND outgoing = :outgoing""",
+    )
+    suspend fun applyDeleteForEveryone(
+        id: String,
+        at: Long,
+        conversationId: String,
+        senderNexId: String,
+        outgoing: Boolean,
+    )
 
     @Query("UPDATE messages SET deletedLocally = 1 WHERE id = :id")
     suspend fun deleteLocally(id: String)

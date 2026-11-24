@@ -3,7 +3,13 @@ import { setTimeout as sleep } from "node:timers/promises";
 import type { FastifyInstance } from "fastify";
 import type { AppConfig } from "../config";
 import type { Database } from "../db";
-import { HttpError, requireAuth, type EnvelopeRow, type UserRow } from "../http";
+import {
+  HttpError,
+  assertActiveSession,
+  requireAuth,
+  type EnvelopeRow,
+  type UserRow,
+} from "../http";
 import type { TokenService } from "../security/tokens";
 import {
   ackSchema,
@@ -20,6 +26,17 @@ interface Deps {
   tokens: TokenService;
   config: AppConfig;
   hub: WsHub;
+}
+
+const PRIORITY_MAX_TTL_SECONDS = 300;
+const PRIORITY_BUDGET_PER_MINUTE = 30;
+
+function publicIceServers(servers: unknown): Array<{ urls: unknown }> {
+  if (!Array.isArray(servers)) return [];
+  return servers.flatMap((server) => {
+    if (!server || typeof server !== "object" || !("urls" in server)) return [];
+    return [{ urls: (server as { urls: unknown }).urls }];
+  });
 }
 
 export function envelopePayload(
@@ -129,7 +146,15 @@ export async function registerMessageRoutes(app: FastifyInstance, deps: Deps): P
     reply.raw.on("close", () => {
       disconnected = true;
     });
+    let revalidationTick = 0;
     while (!disconnected) {
+      // requireAuth() runs once at request start. A long poll can stay open for
+      // 25 seconds, so re-check account state every ~2 seconds to make an
+      // administrative ban/suspension effective without waiting for reconnect.
+      if (revalidationTick % 4 === 0) {
+        await assertActiveSession(db, auth.user.id, auth.device.id);
+      }
+      revalidationTick += 1;
       const messages = await fetchPendingForDevice(db, auth.device.id);
       if (messages.length > 0) return reply.send({ messages });
       if (Date.now() >= deadline) break;
@@ -153,12 +178,32 @@ export async function registerMessageRoutes(app: FastifyInstance, deps: Deps): P
     const groupMembershipCache = new Map<string, { sender: boolean }>();
     const userCache = new Map<string, UserRow | null>();
     const devicesCache = new Map<string, { id: string; user_id: string; signal_device_id: number; revoked_at: Date | string | null } | null>();
+    const priorityRows = await db.one<{ count: string }>(
+      `SELECT count(*)::text AS count FROM envelopes
+       WHERE sender_device_id = $1 AND priority = TRUE
+         AND created_at >= $2`,
+      [auth.device.id, new Date(Date.now() - 60_000)],
+    );
+    let priorityUsed = Number(priorityRows?.count ?? 0);
 
     for (const message of body.messages) {
+      // The zod schema caps the legacy default. Enforce the deployment's
+      // configured cap as well so /v1/config cannot advertise a smaller limit
+      // than the relay actually accepts.
+      const ciphertextBytes = Buffer.byteLength(message.ciphertext, "base64");
+      if (ciphertextBytes > config.maxEnvelopeBytes) {
+        skipped.push({
+          clientId: message.clientId,
+          reason: "ENVELOPE_TOO_LARGE",
+          recipientSignalDeviceId: message.recipientSignalDeviceId,
+        });
+        continue;
+      }
       let recipient = userCache.get(message.recipientNexId);
       if (recipient === undefined) {
         recipient = await db.one<UserRow>(
-          "SELECT * FROM users WHERE nex_id = $1 AND deleted_at IS NULL",
+          `SELECT * FROM users WHERE nex_id = $1 AND deleted_at IS NULL
+             AND suspended_at IS NULL AND banned_at IS NULL`,
           [message.recipientNexId],
         );
         userCache.set(message.recipientNexId, recipient);
@@ -240,6 +285,18 @@ export async function registerMessageRoutes(app: FastifyInstance, deps: Deps): P
       }
 
       const requestedExpirySeconds = message.expiresInSeconds ?? 7 * 24 * 3600;
+      // The relay cannot decrypt a payload to learn its content type, so the
+      // client may still request priority for call signaling. Bound it to the
+      // short TTL used by signaling and to a small per-device budget; ordinary
+      // long-lived messages cannot jump the queue.
+      let serverPriority = message.priority && requestedExpirySeconds <= PRIORITY_MAX_TTL_SECONDS;
+      if (serverPriority) {
+        if (priorityUsed >= PRIORITY_BUDGET_PER_MINUTE) {
+          serverPriority = false;
+        } else {
+          priorityUsed += 1;
+        }
+      }
       const expiry = new Date(
         Math.min(
           Date.now() + requestedExpirySeconds * 1000,
@@ -265,7 +322,7 @@ export async function registerMessageRoutes(app: FastifyInstance, deps: Deps): P
           message.cipherType,
           message.ciphertext,
           message.ephemeral,
-          message.priority,
+          serverPriority,
           expiry,
         ],
       );
@@ -469,7 +526,8 @@ export async function registerMessageRoutes(app: FastifyInstance, deps: Deps): P
     return reply
       .header("cache-control", "public, max-age=30")
       .send({
-        iceServers: config.iceServers,
+        // Never publish static TURN credentials here; this endpoint is public.
+        iceServers: publicIceServers(config.iceServers),
         limits: {
           maxEnvelopeBytes: config.maxEnvelopeBytes,
           envelopeTtlDays: config.envelopeTtlDays,

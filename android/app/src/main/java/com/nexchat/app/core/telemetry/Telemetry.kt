@@ -9,6 +9,7 @@ import com.nexchat.app.core.network.ApiClient
 import com.nexchat.app.core.network.CallReportRequest
 import com.nexchat.app.core.network.CrashReportRequest
 import com.nexchat.app.core.network.NexJson
+import com.nexchat.app.core.security.LogRedactor
 import com.nexchat.app.data.AuthRepository
 import com.nexchat.app.data.AuthState
 import java.time.Instant
@@ -23,6 +24,13 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
+
+/** Log warnings are debug-only; release keeps at most a generic, redacted line. */
+private fun telemetryWarning(message: String?) {
+    if (BuildConfig.DEBUG) {
+        Log.w("NEXCHAT_TELEMETRY", LogRedactor.redact(message))
+    }
+}
 
 /**
  * Best-effort operational telemetry. Nothing here carries message text, keys,
@@ -81,7 +89,7 @@ class Telemetry(
                     type = type,
                     appVersion = BuildConfig.VERSION_NAME,
                     platform = "android",
-                    metadata = metadata,
+                    metadata = LogRedactor.redactMap(metadata),
                 )).takeLast(MAX_QUEUED_EVENTS)
                 writeQueue(queue.copy(events = next))
             }
@@ -117,7 +125,7 @@ class Telemetry(
         )
         scope.launch(Dispatchers.IO) {
             runCatching { api.analyticsCall(request) }
-                .onFailure { Log.w(TAG, "call telemetry failed: ${it.message}") }
+                .onFailure { telemetryWarning("call telemetry failed: ${it.message}") }
         }
     }
 
@@ -135,7 +143,7 @@ class Telemetry(
                 val batch = queue.events.take(MAX_EVENTS_PER_REQUEST)
                 val result = runCatching { api.analyticsEvents(batch) }
                 if (result.isFailure) {
-                    Log.w(TAG, "event batch failed: ${result.exceptionOrNull()?.message}")
+                    telemetryWarning("event batch failed: ${result.exceptionOrNull()?.message}")
                     failed = true
                     break
                 }
@@ -152,16 +160,16 @@ class Telemetry(
                 val result = runCatching {
                     api.analyticsCrash(
                         CrashReportRequest(
-                            message = crash.message,
-                            stack = crash.stack,
+                            message = LogRedactor.redact(crash.message),
+                            stack = LogRedactor.redact(crash.stack),
                             appVersion = BuildConfig.VERSION_NAME,
                             platform = "android",
-                            context = crash.context,
+                            context = LogRedactor.redactMap(crash.context),
                         ),
                     )
                 }
                 if (result.isFailure) {
-                    Log.w(TAG, "crash report failed: ${result.exceptionOrNull()?.message}")
+                    telemetryWarning("crash report failed: ${result.exceptionOrNull()?.message}")
                     break
                 }
                 queue = queueMutex.withLock {
@@ -183,7 +191,7 @@ class Telemetry(
     private fun writeQueue(queue: TelemetryQueue) {
         runCatching {
             prefs.edit().putString(KEY_QUEUE, NexJson.encodeToString(queue)).apply()
-        }.onFailure { Log.w(TAG, "telemetry queue write failed: ${it.message}") }
+        }.onFailure { telemetryWarning("telemetry queue write failed: ${it.message}") }
     }
 
     private fun iso(epochMillis: Long?): String? =
@@ -204,7 +212,6 @@ class Telemetry(
     )
 
     companion object {
-        private const val TAG = "NEXCHAT_TELEMETRY"
         private const val PREFS = "nexchat_telemetry"
         private const val KEY_QUEUE = "queue_v1"
         private const val MAX_QUEUED_EVENTS = 200
@@ -229,7 +236,7 @@ class Telemetry(
                 val previous = Thread.getDefaultUncaughtExceptionHandler()
                 Thread.setDefaultUncaughtExceptionHandler { thread, error ->
                     runCatching { persistCrash(appContext, thread, error) }
-                        .onFailure { Log.w(TAG, "crash persistence failed: ${it.message}") }
+                        .onFailure { telemetryWarning("crash persistence failed: ${it.message}") }
                     if (previous != null) {
                         previous.uncaughtException(thread, error)
                     } else {
@@ -245,10 +252,10 @@ class Telemetry(
                 ?.let { runCatching { NexJson.decodeFromString<TelemetryQueue>(it) }.getOrNull() }
                 ?: TelemetryQueue()
             val entry = CrashEntry(
-                message = (error.message ?: error.javaClass.name).take(4000),
-                stack = error.stackTraceToString().take(16_000),
+                message = LogRedactor.redact(error.message ?: error.javaClass.name).take(4000),
+                stack = LogRedactor.redact(error.stackTraceToString()).take(16_000),
                 context = mapOf(
-                    "thread" to thread.name,
+                    "thread" to LogRedactor.redact(thread.name),
                     "appVersion" to BuildConfig.VERSION_NAME,
                 ),
                 at = System.currentTimeMillis(),

@@ -7,6 +7,7 @@ import com.nexchat.app.core.network.AnnouncementDto
 import com.nexchat.app.core.network.ApiClient
 import com.nexchat.app.core.network.IceServerDto
 import com.nexchat.app.core.network.NexJson
+import com.nexchat.app.core.security.LogRedactor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -21,7 +22,9 @@ data class RemoteConfigState(
     val loaded: Boolean = false,
     val version: Int = 0,
     val callsEnabled: Boolean = true,
-    val videoCallsEnabled: Boolean = true,
+    // Fail closed on a fresh install with no cached config; cached installs
+    // keep the value they already fetched (see CachedRemoteConfig below).
+    val videoCallsEnabled: Boolean = false,
     val maxCallDurationSeconds: Int = 3600,
     val maintenanceMode: Boolean = false,
     val maintenanceMessage: String = "",
@@ -61,7 +64,9 @@ class RemoteConfigStore(
 
     suspend fun refresh(): Boolean {
         val response = runCatching { api.serverConfig() }.getOrElse { error ->
-            Log.w(TAG, "config refresh failed: ${error.message}")
+            if (BuildConfig.DEBUG) {
+                Log.w(TAG, "config refresh failed: ${LogRedactor.redact(error.message)}")
+            }
             return false
         }
         val remote = response.remote
@@ -86,6 +91,8 @@ class RemoteConfigStore(
     }
 
     fun callsEnabled(): Boolean = _state.value.callsEnabled
+
+    fun videoCallsEnabled(): Boolean = _state.value.videoCallsEnabled
 
     fun maxCallDurationSeconds(): Int = _state.value.maxCallDurationSeconds.coerceIn(60, 14_400)
 
@@ -140,7 +147,11 @@ class RemoteConfigStore(
         )
         runCatching {
             prefs.edit().putString(KEY_CACHE, NexJson.encodeToString(cached)).apply()
-        }.onFailure { Log.w(TAG, "config cache write failed: ${it.message}") }
+        }.onFailure { error ->
+            if (BuildConfig.DEBUG) {
+                Log.w(TAG, "config cache write failed: ${LogRedactor.redact(error.message)}")
+            }
+        }
     }
 
     private fun announcementKey(announcement: AnnouncementDto): String =

@@ -349,6 +349,29 @@ describe("super admin panel", () => {
     assert.equal(body.remote.maxCallDurationSeconds, 1800);
     assert.equal(body.remote.maintenanceMode, true);
     assert.equal(body.features.audioCalls, "disabled");
+
+    // Maintenance mode is now enforced server-side for mobile API traffic.
+    // Restore access so the remaining account/audit assertions can run.
+    const restored = await app.inject({
+      method: "PATCH",
+      url: "/v1/admin/config",
+      headers: adminHeaders(),
+      payload: {
+        callsEnabled: false,
+        videoCallsEnabled: false,
+        maxCallDurationSeconds: 1800,
+        maintenanceMode: false,
+        maintenanceMessage: "",
+        minAppVersion: "1.0.0",
+      },
+    });
+    assert.equal(restored.statusCode, 200);
+    const maintenanceCheck = await app.inject({
+      method: "GET",
+      url: "/v1/messages/pending",
+      headers: { authorization: `Bearer ${userToken}` },
+    });
+    assert.equal(maintenanceCheck.statusCode, 200);
   });
 
   it("publishes an announcement that the public endpoint exposes", async () => {
@@ -674,6 +697,25 @@ describe("super admin panel", () => {
     const expiresInMs = new Date(requested.expiresAt).getTime() - Date.now();
     assert.ok(expiresInMs > 14 * 60 * 1000 && expiresInMs <= 15 * 60 * 1000);
 
+    // A second outstanding token must be invalidated once the first one is used.
+    const recovery = await db.one<{ id: string }>(
+      "SELECT id FROM admin_users WHERE username = $1",
+      ["recovery@example.com"],
+    );
+    assert.ok(recovery);
+    const secondToken = randomBytes(32).toString("base64url");
+    await db.query(
+      `INSERT INTO admin_password_resets (id, admin_id, token_hash, expires_at, ip)
+       VALUES ($1,$2,$3,$4,$5)`,
+      [
+        randomUUID(),
+        recovery!.id,
+        hashSessionToken(secondToken),
+        new Date(Date.now() + 15 * 60 * 1000),
+        "127.0.0.1",
+      ],
+    );
+
     const wrongOwner = await app.inject({
       method: "POST",
       url: "/v1/admin/auth/reset/confirm",
@@ -730,6 +772,12 @@ describe("super admin panel", () => {
     });
     assert.equal(reused.statusCode, 400);
 
+    const sibling = await db.one<{ used_at: Date | string | null }>(
+      "SELECT used_at FROM admin_password_resets WHERE token_hash = $1",
+      [hashSessionToken(secondToken)],
+    );
+    assert.ok(sibling?.used_at, "the unused reset token should have been invalidated");
+
     const oldPassword = await app.inject({
       method: "POST",
       url: "/v1/admin/auth/login",
@@ -746,19 +794,25 @@ describe("super admin panel", () => {
   });
 
   it("rejects an expired one-time reset token", async () => {
-    const request = await app.inject({
-      method: "POST",
-      url: "/v1/admin/auth/reset/request",
-      headers: { "x-setup-token": SETUP_TOKEN },
-      payload: { email: "rootadmin@example.com" },
-    });
-    assert.equal(request.statusCode, 200);
-    const { resetToken } = request.json() as { resetToken: string };
-
-    await db.query("UPDATE admin_password_resets SET expires_at = $1 WHERE token_hash = $2", [
-      new Date(Date.now() - 1000),
-      hashSessionToken(resetToken),
-    ]);
+    // Insert the expired token directly so the HTTP reset-request rate limit is
+    // reserved for the dedicated rate-limit test at the end of this suite.
+    const root = await db.one<{ id: string }>(
+      "SELECT id FROM admin_users WHERE username = $1",
+      ["rootadmin@example.com"],
+    );
+    assert.ok(root);
+    const resetToken = randomBytes(32).toString("base64url");
+    await db.query(
+      `INSERT INTO admin_password_resets (id, admin_id, token_hash, expires_at, ip)
+       VALUES ($1,$2,$3,$4,$5)`,
+      [
+        randomUUID(),
+        root!.id,
+        hashSessionToken(resetToken),
+        new Date(Date.now() - 1000),
+        "127.0.0.1",
+      ],
+    );
 
     const response = await app.inject({
       method: "POST",
@@ -833,6 +887,63 @@ describe("super admin panel", () => {
     });
     assert.equal(response.statusCode, 401);
     assert.equal((response.json() as { error: { code: string } }).error.code, "ADMIN_SESSION_EXPIRED");
+  });
+
+  it("restarts the lockout counter after the lockout window expires", async () => {
+    await db.query(
+      "UPDATE admin_users SET failed_attempts = 5, locked_until = $1 WHERE username = $2",
+      [new Date(Date.now() - 60_000), "recovery@example.com"],
+    );
+    const wrongPassword = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/login",
+      payload: { email: "recovery@example.com", password: "WrongPassword-123" },
+    });
+    assert.equal(wrongPassword.statusCode, 401);
+
+    const row = await db.one<{ failed_attempts: unknown; locked_until: Date | string | null }>(
+      "SELECT failed_attempts, locked_until FROM admin_users WHERE username = $1",
+      ["recovery@example.com"],
+    );
+    assert.equal(Number(row?.failed_attempts), 1);
+    assert.equal(row?.locked_until, null);
+
+    const correctPassword = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/login",
+      payload: { email: "recovery@example.com", password: NEW_PASSWORD },
+    });
+    assert.equal(correctPassword.statusCode, 200);
+  });
+
+  it("protects the last active super admin from demotion", async () => {
+    const self = await app.inject({
+      method: "GET",
+      url: "/v1/admin/auth/me",
+      headers: { cookie },
+    });
+    assert.equal(self.statusCode, 200);
+    const selfId = (self.json() as { admin: { id: string } }).admin.id;
+
+    await db.query(
+      "UPDATE admin_users SET active = FALSE WHERE role = 'super_admin' AND username <> $1",
+      ["rootadmin@example.com"],
+    );
+    const demotion = await app.inject({
+      method: "PATCH",
+      url: `/v1/admin/admins/${selfId}`,
+      headers: adminHeaders(),
+      payload: { role: "admin" },
+    });
+    assert.equal(demotion.statusCode, 409);
+    assert.equal(
+      (demotion.json() as { error: { code: string } }).error.code,
+      "LAST_SUPER_ADMIN",
+    );
+
+    await db.query("UPDATE admin_users SET active = TRUE WHERE username = $1", [
+      "recovery@example.com",
+    ]);
   });
 
   it("rate limits repeated break-glass reset attempts", async () => {

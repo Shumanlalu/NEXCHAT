@@ -15,6 +15,8 @@ export interface UserRow {
   deleted_at: Date | string | null;
   suspended_at?: Date | string | null;
   suspended_reason?: string | null;
+  banned_at?: Date | string | null;
+  banned_reason?: string | null;
 }
 
 export interface DeviceRow {
@@ -107,11 +109,13 @@ export async function requireAuth(
     device_revoked_at: Date | string | null;
     suspended_at: Date | string | null;
     suspended_reason: string | null;
+    banned_at: Date | string | null;
+    banned_reason: string | null;
   };
   const rows = await db.query<AuthRow>(
     `SELECT u.id, u.nex_id, u.username, u.display_name, u.password_hash, u.password_salt,
             u.avatar, u.share_presence, u.created_at, u.deleted_at,
-            u.suspended_at, u.suspended_reason,
+            u.suspended_at, u.suspended_reason, u.banned_at, u.banned_reason,
             d.id AS device_id, d.user_id AS device_user_id, d.name AS device_name,
             d.platform AS device_platform, d.registration_id AS device_registration_id,
             d.signal_device_id AS device_signal_device_id,
@@ -131,6 +135,15 @@ export async function requireAuth(
   const row = rows[0];
   if (!row) {
     throw new HttpError(401, "SESSION_REVOKED", "This session has been revoked");
+  }
+  if (row.banned_at) {
+    throw new HttpError(
+      403,
+      "ACCOUNT_BANNED",
+      row.banned_reason
+        ? `This account is banned: ${row.banned_reason}`
+        : "This account is banned",
+    );
   }
   if (row.suspended_at) {
     throw new HttpError(
@@ -166,6 +179,8 @@ export async function requireAuth(
       deleted_at: row.deleted_at,
       suspended_at: row.suspended_at,
       suspended_reason: row.suspended_reason,
+      banned_at: row.banned_at,
+      banned_reason: row.banned_reason,
     },
     device: {
       id: row.device_id,
@@ -186,6 +201,52 @@ export async function requireAuth(
       revoked_at: row.device_revoked_at,
     },
   };
+}
+
+/**
+ * Re-check the server-side account/device state for a long-lived request or
+ * socket. Access tokens are stateless, so this is the only way to make an
+ * administrative ban, suspension or device revocation take effect immediately.
+ */
+export async function assertActiveSession(
+  db: Database,
+  userId: string,
+  deviceId: string,
+): Promise<void> {
+  type StateRow = {
+    deleted_at: Date | string | null;
+    revoked_at: Date | string | null;
+    suspended_at: Date | string | null;
+    suspended_reason: string | null;
+    banned_at: Date | string | null;
+    banned_reason: string | null;
+  };
+  const row = await db.one<StateRow>(
+    `SELECT u.deleted_at, u.suspended_at, u.suspended_reason,
+            u.banned_at, u.banned_reason, d.revoked_at
+     FROM users u JOIN devices d ON d.user_id = u.id
+     WHERE u.id = $1 AND d.id = $2`,
+    [userId, deviceId],
+  );
+  if (!row || row.deleted_at || row.revoked_at) {
+    throw new HttpError(401, "SESSION_REVOKED", "This session has been revoked");
+  }
+  if (row.banned_at) {
+    throw new HttpError(
+      403,
+      "ACCOUNT_BANNED",
+      row.banned_reason ? `This account is banned: ${row.banned_reason}` : "This account is banned",
+    );
+  }
+  if (row.suspended_at) {
+    throw new HttpError(
+      403,
+      "ACCOUNT_SUSPENDED",
+      row.suspended_reason
+        ? `This account is suspended: ${row.suspended_reason}`
+        : "This account is suspended",
+    );
+  }
 }
 
 export function getBearerToken(request: FastifyRequest): string | null {

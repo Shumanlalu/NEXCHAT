@@ -279,7 +279,7 @@ function delta(current, previous){
   return '<span class="delta ' + cls + '">' + (change > 0 ? '+' : '') + change + '%</span>';
 }
 function statusPill(status){
-  const map = { active:'ok', connected:'ok', ended:'ok', suspended:'warn', ringing:'info', declined:'warn', missed:'warn', failed:'bad', deleted:'bad' };
+  const map = { active:'ok', connected:'ok', ended:'ok', suspended:'warn', banned:'bad', ringing:'info', declined:'warn', missed:'warn', failed:'bad', deleted:'bad' };
   return '<span class="pill ' + (map[status] || '') + '">' + h(status) + '</span>';
 }
 function toast(message, kind){
@@ -800,7 +800,7 @@ async function usersView(){
   main.innerHTML =
     '<div class="toolbar">' +
       '<input class="input" id="user-search" placeholder="Search username, display name or NEX ID" style="min-width:290px;flex:1" value="' + h(state.userQuery) + '">' +
-      '<select id="user-status"><option value="active">Active</option><option value="suspended">Suspended</option><option value="deleted">Deleted</option><option value="all">All accounts</option></select>' +
+      '<select id="user-status"><option value="active">Active</option><option value="suspended">Suspended</option><option value="banned">Banned</option><option value="deleted">Deleted</option><option value="all">All accounts</option></select>' +
       '<select id="user-sort"><option value="created_desc">Newest first</option><option value="last_seen_desc">Recently active</option><option value="username_asc">Username A–Z</option><option value="created_asc">Oldest first</option></select>' +
       (can('reports.export') ? '<a class="btn ghost" href="/v1/admin/reports/users/export.csv?range=' + encodeURIComponent(state.range) + '">Export CSV</a>' : '') +
     '</div>' +
@@ -847,13 +847,23 @@ async function openUser(id){
   try {
     const data = await api('/v1/admin/users/' + encodeURIComponent(id));
     const user = data.user;
-    const actions = can('users.write')
-      ? '<div class="row" style="margin-top:14px">' +
-          (user.status === 'active'
-            ? '<button class="btn danger" data-user-action="suspend">Suspend account</button>'
-            : '<button class="btn" data-user-action="restore">Reactivate account</button>') +
-          (user.status !== 'deleted' ? '<button class="btn danger" data-user-action="delete">Soft-delete</button>' : '') +
-        '</div>'
+    const actionButtons = [];
+    if (user.status === 'active' || user.status === 'suspended') {
+      actionButtons.push('<button class="btn danger" data-user-action="suspend">Suspend account</button>');
+    }
+    if (user.status === 'suspended' || user.status === 'deleted') {
+      actionButtons.push('<button class="btn" data-user-action="restore">Reactivate account</button>');
+    }
+    if (user.status === 'banned') {
+      actionButtons.push('<button class="btn" data-user-action="unban">Lift ban</button>');
+    } else if (user.status !== 'deleted') {
+      actionButtons.push('<button class="btn danger" data-user-action="ban">Ban account</button>');
+    }
+    if (user.status !== 'deleted') {
+      actionButtons.push('<button class="btn danger" data-user-action="delete">Soft-delete</button>');
+    }
+    const actions = can('users.write') && actionButtons.length
+      ? '<div class="row" style="margin-top:14px">' + actionButtons.join('') + '</div>'
       : '';
     $('#modal-root').innerHTML = '<div class="modal-backdrop"><div class="modal"><div class="modal-head"><div><h3>' + h(user.displayName || user.username) + '</h3><div class="tiny">@' + h(user.username) + ' · <span class="mono">' + h(user.nexId) + '</span></div></div><button class="icon-btn close" data-close>×</button></div>' +
       '<div class="grid cards" style="margin-bottom:14px">' + card('Status', statusPill(user.status), '') + card('Devices', fmtNum(data.counts ? user.deviceCount : 0), 'registered') + card('Messages (retained)', fmtNum(data.counts.sent + data.counts.received), fmtNum(data.counts.sent) + ' sent') + card('Calls', fmtNum(data.counts.calls), fmtNum(data.counts.crashes) + ' crashes') + '</div>' +
@@ -871,10 +881,10 @@ async function openUser(id){
   }
 }
 function userAction(user, action){
-  const labels = { suspend:'Suspend', restore:'Reactivate', delete:'Soft-delete' };
+  const labels = { suspend:'Suspend', ban:'Ban', restore:'Reactivate', unban:'Lift ban', delete:'Soft-delete' };
   $('#modal-root').innerHTML = '<div class="modal-backdrop"><div class="modal"><div class="modal-head"><div><h3>' + labels[action] + ' ' + h(user.username) + '</h3><p class="hint">This action is written to the audit log.</p></div><button class="icon-btn close" data-close>×</button></div>' +
-    (action === 'suspend' || action === 'delete' ? '<label class="field"><span>Reason (optional, shown to the operator)</span><textarea id="action-reason" maxlength="300"></textarea></label>' : '<div class="notice">The account will be able to sign in again and keep its existing encryption identity.</div>') +
-    '<div class="row end"><button class="btn" data-close>Cancel</button><button class="btn ' + (action === 'restore' ? 'primary' : 'danger') + '" id="action-confirm">' + labels[action] + '</button></div></div></div>';
+    (action === 'suspend' || action === 'ban' || action === 'delete' ? '<label class="field"><span>Reason (optional, shown to the operator)</span><textarea id="action-reason" maxlength="300"></textarea></label>' : '<div class="notice">The account will be able to sign in again and keep its existing encryption identity.</div>') +
+    '<div class="row end"><button class="btn" data-close>Cancel</button><button class="btn ' + (action === 'restore' || action === 'unban' ? 'primary' : 'danger') + '" id="action-confirm">' + labels[action] + '</button></div></div></div>';
   bindModalClose();
   $('#action-confirm').addEventListener('click', async () => {
     try {

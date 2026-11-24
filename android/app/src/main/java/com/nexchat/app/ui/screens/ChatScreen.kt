@@ -175,6 +175,12 @@ fun ChatScreen(
             }
             return
         }
+        if (video && !container.remoteConfig.videoCallsEnabled()) {
+            scope.launch {
+                snackbar.showSnackbar("Video calls are temporarily unavailable.")
+            }
+            return
+        }
         val target = conv
         val peer = target?.peerNexId
         if (target?.type != "DM" || peer.isNullOrBlank()) {
@@ -232,6 +238,12 @@ fun ChatScreen(
         if (!remote.callsEnabled) {
             scope.launch {
                 snackbar.showSnackbar("Calling is temporarily unavailable.")
+            }
+            return
+        }
+        if (video && !container.remoteConfig.videoCallsEnabled()) {
+            scope.launch {
+                snackbar.showSnackbar("Video calls are temporarily unavailable.")
             }
             return
         }
@@ -340,7 +352,8 @@ fun ChatScreen(
                 onCall = { requestCall(video = false) },
                 onVideoCall = { requestCall(video = true) },
                 callEnabled = conv?.type == "DM" && !blocked && remote.callsEnabled,
-                videoCallEnabled = conv?.type == "DM" && !blocked && remote.callsEnabled,
+                videoCallEnabled = conv?.type == "DM" && !blocked &&
+                    remote.callsEnabled && remote.videoCallsEnabled,
                 onInfo = {
                     val target = conv
                     if (target?.type == "GROUP") {
