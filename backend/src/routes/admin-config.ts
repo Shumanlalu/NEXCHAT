@@ -14,6 +14,10 @@ import {
   verifyCsrf,
 } from "../admin/security";
 import {
+  loadRegistrationSettings,
+  setRegistrationEnabled,
+} from "../admin/registration";
+import {
   DEFAULT_REMOTE_CONFIG,
   loadRemoteConfig,
   remoteConfigSchema,
@@ -37,15 +41,25 @@ const announcementSchema = z.object({
 
 const announcementPatchSchema = announcementSchema.partial();
 
-const adminCreateSchema = z.object({
-  email: z
-    .string()
-    .trim()
-    .transform((value) => value.toLowerCase())
-    .pipe(z.string().max(254).email("Enter a valid email address")),
-  displayName: z.string().trim().min(1).max(60).optional(),
-  password: z.string().min(12).max(128),
-  role: z.enum(["super_admin", "admin", "analyst", "support"]),
+const adminCreateSchema = z
+  .object({
+    email: z
+      .string()
+      .trim()
+      .transform((value) => value.toLowerCase())
+      .pipe(z.string().max(254).email("Enter a valid email address")),
+    displayName: z.string().trim().min(1).max(60),
+    password: z.string().min(12).max(128),
+    confirmPassword: z.string().min(12).max(128),
+    role: z.enum(["super_admin", "admin", "analyst", "support"]),
+  })
+  .refine((value) => value.password === value.confirmPassword, {
+    path: ["confirmPassword"],
+    message: "Passwords do not match",
+  });
+
+const registrationUpdateSchema = z.object({
+  signupEnabled: z.boolean(),
 });
 
 const adminPatchSchema = z.object({
@@ -222,11 +236,42 @@ export async function registerAdminConfigRoutes(
     return reply.send({ ok: true });
   });
 
+  app.get("/v1/admin/registration", async (request, reply) => {
+    await requireAdmin(request, db, config, "admins.manage");
+    const registration = await loadRegistrationSettings(db);
+    return reply.send({
+      registration,
+      signupAvailable: Boolean(config.adminSetupToken) && registration.signupEnabled,
+    });
+  });
+
+  app.put(
+    "/v1/admin/registration",
+    { config: { rateLimit: { max: 20, timeWindow: "15 minutes" } } },
+    async (request, reply) => {
+      const context = await requireAdmin(request, db, config, "admins.manage");
+      verifyCsrf(request, context, config);
+      const body = parseWith(registrationUpdateSchema, request.body);
+      const registration = await setRegistrationEnabled(
+        db,
+        context.admin.id,
+        body.signupEnabled,
+      );
+      await audit(db, context.admin.id, "admin.registration.updated", request, "admin", context.admin.id, {
+        signupEnabled: body.signupEnabled,
+      });
+      return reply.send({
+        registration,
+        signupAvailable: Boolean(config.adminSetupToken) && registration.signupEnabled,
+      });
+    },
+  );
+
   app.post("/v1/admin/admins", async (request, reply) => {
     const context = await requireAdmin(request, db, config, "admins.manage");
     verifyCsrf(request, context, config);
     const body = parseWith(adminCreateSchema, request.body);
-    const passwordError = validatePassword(body.password);
+    const passwordError = validatePassword(body.password, 12);
     if (passwordError) throw new HttpError(400, "WEAK_PASSWORD", passwordError);
     const existing = await db.one<{ id: string }>(
       "SELECT id FROM admin_users WHERE username = $1",
@@ -236,7 +281,6 @@ export async function registerAdminConfigRoutes(
     const { hash, salt } = await hashPassword(body.password);
     const unusedSecret = generateTotpSecret();
     const id = randomUUID();
-    const displayName = body.displayName?.trim() || body.email.split("@")[0] || body.email;
     await db.query(
       `INSERT INTO admin_users
          (id, username, display_name, password_hash, password_salt, totp_secret_enc, role)
@@ -244,7 +288,7 @@ export async function registerAdminConfigRoutes(
       [
         id,
         body.email,
-        displayName,
+        body.displayName,
         hash,
         salt,
         encryptTotpSecret(unusedSecret, config),

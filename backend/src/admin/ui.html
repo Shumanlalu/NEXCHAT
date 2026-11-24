@@ -136,6 +136,25 @@ pre{background:var(--bg-soft);border:1px solid var(--border);border-radius:9px;p
 .auth-card .hint{color:var(--muted);margin:0 0 22px;font-size:13px}
 .auth-card .input{width:100%}
 .auth-card .btn{width:100%;padding:11px;margin-top:4px}
+.auth-form{position:relative}
+.auth-theme{position:absolute;top:18px;right:18px;z-index:2}
+.password-field{position:relative;display:block}
+.password-field .input{padding-right:68px}
+.password-toggle{position:absolute;right:6px;top:50%;transform:translateY(-50%);border:0;background:transparent;color:var(--accent);font-size:12px;font-weight:750;padding:5px 7px;border-radius:6px;cursor:pointer}
+.password-toggle:hover{background:rgba(109,140,255,.12)}
+.auth-links{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:12px 0 4px;font-size:12px}
+.auth-links button{border:0;background:transparent;color:var(--accent);font-weight:700;padding:0;cursor:pointer}
+.auth-links button:hover{text-decoration:underline}
+.auth-remember{margin:8px 0 12px}
+.auth-remember input{width:15px;height:15px;margin-top:2px;accent-color:var(--accent)}
+@keyframes authFade{from{opacity:0}to{opacity:1}}
+@keyframes authSlide{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+@keyframes authBrand{from{opacity:0;transform:translateX(-18px)}to{opacity:1;transform:none}}
+.auth-wrap{animation:authFade .3s ease both}
+.auth-brand{animation:authBrand .55s cubic-bezier(.2,.8,.2,1) both}
+.auth-card{animation:authSlide .5s .08s cubic-bezier(.2,.8,.2,1) both}
+.auth-card form{animation:authSlide .5s .14s cubic-bezier(.2,.8,.2,1) both}
+@media(prefers-reduced-motion:reduce){.auth-wrap,.auth-brand,.auth-card,.auth-card form{animation:none}}
 .secret-box{border:1px dashed var(--accent);background:rgba(109,140,255,.08);padding:14px;border-radius:10px;margin:12px 0}
 .modal-backdrop{position:fixed;inset:0;background:rgba(4,8,20,.68);backdrop-filter:blur(3px);z-index:100;display:grid;place-items:center;padding:18px}
 .modal{background:var(--panel);border:1px solid var(--border);border-radius:16px;box-shadow:var(--shadow);width:min(720px,100%);max-height:90vh;overflow:auto;padding:20px}
@@ -193,7 +212,7 @@ const state = {
   admin: null, csrf: null, route: 'overview', range: '30d',
   userQuery: '', userStatus: 'active', userSort: 'created_desc', userPage: 1,
   callsStatus: '', callsPage: 1, auditPage: 1, auditAction: '',
-  monitoring: null, editingAnnouncement: null, boot: null, callCache: {}
+  monitoring: null, editingAnnouncement: null, boot: null, callCache: {}, reset: null
 };
 const PERMS = {
   super_admin: ['*'],
@@ -269,6 +288,46 @@ function toast(message, kind){
   box.textContent = message;
   $('#toast').appendChild(box);
   setTimeout(() => box.remove(), 4200);
+}
+function passwordField(id, label, options){
+  options = options || {};
+  var autocomplete = options.autocomplete || 'current-password';
+  var min = options.min ? ' minlength="' + options.min + '"' : '';
+  var placeholder = options.placeholder ? ' placeholder="' + h(options.placeholder) + '"' : '';
+  return '<label class="field"><span>' + h(label) + '</span><span class="password-field">' +
+    '<input class="input" id="' + h(id) + '" type="password" autocomplete="' + h(autocomplete) + '"' + min + ' maxlength="128"' + placeholder + ' required>' +
+    '<button class="password-toggle" type="button" data-password-toggle="' + h(id) + '" aria-label="Show password">Show</button>' +
+    '</span></label>';
+}
+function passwordMismatch(passwordId, confirmId, errorBox){
+  var password = $('#' + passwordId), confirm = $('#' + confirmId);
+  if (!password || !confirm) return false;
+  if (password.value === confirm.value) return false;
+  errorBox.textContent = 'Passwords do not match.';
+  errorBox.style.display = 'block';
+  confirm.focus();
+  return true;
+}
+function bindAuthActions(){
+  document.addEventListener('click', async event => {
+    var toggle = event.target.closest('[data-password-toggle]');
+    if (toggle) {
+      var input = document.getElementById(toggle.dataset.passwordToggle);
+      if (!input) return;
+      var showing = input.type === 'text';
+      input.type = showing ? 'password' : 'text';
+      toggle.textContent = showing ? 'Show' : 'Hide';
+      toggle.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+      return;
+    }
+    var copy = event.target.closest('[data-copy-target]');
+    if (copy) {
+      var target = document.getElementById(copy.dataset.copyTarget);
+      if (!target) return;
+      try { await navigator.clipboard.writeText(target.textContent.trim()); toast('Token copied', 'ok'); }
+      catch (_) { toast('Select and copy the token manually', 'bad'); }
+    }
+  });
 }
 function setTheme(theme){
   document.documentElement.dataset.theme = theme;
@@ -355,8 +414,12 @@ function authShell(title, subtitle, body){
         '<ul><li>Email and password administration</li><li>Role-based access with a full audit trail</li><li>Remote feature flags and announcements</li><li>CSV reports and printable summaries</li></ul></div>' +
         '<div class="tiny">Encrypted communications stay private. This panel never exposes message content, keys or call media.</div>' +
       '</section>' +
-      '<section class="auth-form"><div class="auth-card"><h2>' + h(title) + '</h2><p class="hint">' + h(subtitle) + '</p>' + body + '</div></section>' +
+      '<section class="auth-form">' +
+        '<button class="icon-btn auth-theme" id="auth-theme-btn" type="button" title="Toggle light and dark theme" aria-label="Toggle light and dark theme">◐</button>' +
+        '<div class="auth-card"><h2>' + h(title) + '</h2><p class="hint">' + h(subtitle) + '</p>' + body + '</div>' +
+      '</section>' +
     '</div>';
+  $('#auth-theme-btn').addEventListener('click', () => setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
 }
 function showFatal(message){
   $('#app').innerHTML = '<div class="boot"><div style="max-width:520px;text-align:center"><div class="error-box">' + h(message) + '</div><button class="btn primary" id="fatal-retry">Retry</button></div></div>';
@@ -364,11 +427,14 @@ function showFatal(message){
 }
 async function boot(){
   initTheme();
+  bindAuthActions();
   try {
     const response = await fetch('/v1/admin/bootstrap', { credentials:'same-origin' });
     const data = await response.json();
     state.boot = data;
-    if (location.pathname.replace(/\/+$/, '') === '/admin/signup') return showSignup(data);
+    const path = location.pathname.replace(/\/+$/, '');
+    if (path === '/admin/forgot') return showForgot();
+    if (path === '/admin/signup') return showSignup(data);
     if (data.setupRequired) return showSetup(data);
     const me = await fetch('/v1/admin/auth/me', { credentials:'same-origin' });
     if (me.status === 200) {
@@ -382,42 +448,52 @@ async function boot(){
   }
 }
 function showLogin(message){
-  state.admin = null; state.csrf = null;
-  authShell('Administrator sign-in', 'Use your admin email address and password.',
+  state.admin = null; state.csrf = null; state.reset = null;
+  var rememberDefault = false;
+  try { rememberDefault = localStorage.getItem('nexchat_admin_remember') === 'true'; } catch (_) {}
+  var sessionHours = state.boot && state.boot.sessionHours ? state.boot.sessionHours : 12;
+  var rememberDays = state.boot && state.boot.rememberDays ? state.boot.rememberDays : 30;
+  authShell('Welcome back', 'Sign in with your administrator email address and password.',
     (message ? '<div class="error-box">' + h(message) + '</div>' : '') +
     '<form id="login-form">' +
-      '<label class="field"><span>Email address</span><input class="input" id="login-email" type="email" autocomplete="username" required maxlength="254" placeholder="you@example.com"></label>' +
-      '<label class="field"><span>Password</span><input class="input" id="login-password" type="password" autocomplete="current-password" required maxlength="128"></label>' +
+      '<label class="field"><span>Email address</span><input class="input" id="login-email" type="text" inputmode="email" autocomplete="username" required maxlength="254" placeholder="you@example.com"></label>' +
+      passwordField('login-password', 'Password', { autocomplete:'current-password' }) +
+      '<label class="check auth-remember"><input type="checkbox" id="login-remember"' + (rememberDefault ? ' checked' : '') + '><span><b>Remember me</b><small>Keep this browser signed in for ' + h(rememberDays) + ' days.</small></span></label>' +
       '<div class="error-box" id="login-error" style="display:none"></div>' +
-      '<button class="btn primary" id="login-submit" type="submit">Sign in securely</button>' +
+      '<button class="btn primary" id="login-submit" type="submit">Sign In</button>' +
     '</form>' +
-    '<p class="tiny" style="margin-top:16px">Sessions expire after 12 hours and are bound to an HttpOnly, SameSite cookie.</p>' +
-    (state.boot && state.boot.signupEnabled
-      ? '<p class="tiny" style="margin-top:12px"><a href="#" id="login-signup" style="color:inherit">Lost access? Create an admin with the setup token</a></p>'
-      : '')
+    '<div class="auth-links">' +
+      '<button type="button" id="login-forgot">Forgot password?</button>' +
+      (state.boot && state.boot.signupEnabled
+        ? '<button type="button" id="login-signup">Create administrator</button>'
+        : '') +
+    '</div>' +
+    '<p class="tiny" style="margin-top:14px">Sessions expire after ' + h(sessionHours) + ' hours' + (rememberDays ? ' or ' + h(rememberDays) + ' days with Remember me' : '') + ' and are bound to an HttpOnly, SameSite cookie.</p>'
   );
+  $('#login-forgot').addEventListener('click', () => { location.href = '/admin/forgot'; });
   var signupLink = $('#login-signup');
-  if (signupLink) signupLink.addEventListener('click', event => {
-    event.preventDefault(); location.href = '/admin/signup';
-  });
+  if (signupLink) signupLink.addEventListener('click', () => { location.href = '/admin/signup'; });
   $('#login-form').addEventListener('submit', async event => {
     event.preventDefault();
-    const button = $('#login-submit'), errorBox = $('#login-error');
-    errorBox.style.display = 'none'; button.disabled = true; button.textContent = 'Verifying…';
+    var button = $('#login-submit'), errorBox = $('#login-error');
+    var remember = $('#login-remember').checked;
+    errorBox.style.display = 'none'; button.disabled = true; button.textContent = 'Signing in…';
     try {
-      const data = await api('/v1/admin/auth/login', {
+      var data = await api('/v1/admin/auth/login', {
         method:'POST', allow401:true,
         body: {
           email: $('#login-email').value.trim(),
-          password: $('#login-password').value
+          password: $('#login-password').value,
+          remember: remember
         }
       });
+      try { localStorage.setItem('nexchat_admin_remember', String(remember)); } catch (_) {}
       state.admin = data.admin; state.csrf = data.csrfToken;
       location.hash = '#/overview';
       showApp();
     } catch (error) {
       errorBox.textContent = error.message; errorBox.style.display = 'block';
-      button.disabled = false; button.textContent = 'Sign in securely';
+      button.disabled = false; button.textContent = 'Sign In';
     }
   });
 }
@@ -429,72 +505,85 @@ function showSetup(bootstrap){
     );
     return;
   }
-  authShell('Create the first super admin', 'This page works once. Choose an email address and password.',
+  authShell('Create the first super admin', 'This page works once. Choose a full name, email address and password.',
     '<form id="setup-form">' +
       '<label class="field"><span>One-time setup token</span><input class="input" id="setup-token" type="password" autocomplete="off" required></label>' +
+      '<label class="field"><span>Full name</span><input class="input" id="setup-name" type="text" autocomplete="name" required maxlength="60" placeholder="Your name"></label>' +
       '<label class="field"><span>Email address</span><input class="input" id="setup-email" type="email" autocomplete="username" required maxlength="254" placeholder="you@example.com"></label>' +
-      '<label class="field"><span>Password (12+ characters)</span><input class="input" id="setup-password" type="password" autocomplete="new-password" required minlength="12" maxlength="128"></label>' +
+      passwordField('setup-password', 'Password (12+ characters)', { autocomplete:'new-password', min:12 }) +
+      passwordField('setup-confirm', 'Confirm password', { autocomplete:'new-password', min:12 }) +
       '<div class="error-box" id="setup-error" style="display:none"></div>' +
-      '<button class="btn primary" id="setup-submit" type="submit">Create administrator</button>' +
+      '<button class="btn primary" id="setup-submit" type="submit">Create Account</button>' +
     '</form>'
   );
   $('#setup-form').addEventListener('submit', async event => {
     event.preventDefault();
-    const button = $('#setup-submit'), errorBox = $('#setup-error');
-    errorBox.style.display = 'none'; button.disabled = true; button.textContent = 'Creating…';
+    var button = $('#setup-submit'), errorBox = $('#setup-error');
+    errorBox.style.display = 'none';
+    if (passwordMismatch('setup-password', 'setup-confirm', errorBox)) return;
+    button.disabled = true; button.textContent = 'Creating…';
     try {
-      const data = await api('/v1/admin/setup', {
+      await api('/v1/admin/setup', {
         method:'POST',
         headers:{ 'x-setup-token': $('#setup-token').value.trim() },
         body: {
+          displayName: $('#setup-name').value.trim(),
           email: $('#setup-email').value.trim(),
-          password: $('#setup-password').value
+          password: $('#setup-password').value,
+          confirmPassword: $('#setup-confirm').value
         }
       });
       authShell('Administrator created', 'Sign in with the email address and password you just chose.',
-        '<div class="notice ok">Your account is ready. No authenticator app is needed.</div>' +
+        '<div class="notice ok">Your account is ready. Sign in to continue.</div>' +
         '<button class="btn primary" id="setup-continue" style="margin-top:14px">Go to sign in</button>'
       );
       $('#setup-continue').addEventListener('click', () => showLogin());
     } catch (error) {
       errorBox.textContent = error.message; errorBox.style.display = 'block';
-      button.disabled = false; button.textContent = 'Create administrator';
+      button.disabled = false; button.textContent = 'Create Account';
     }
   });
 }
 function showSignup(bootstrap){
   if (!bootstrap.signupEnabled) {
-    authShell('Signup is locked', 'No ADMIN_SETUP_TOKEN is configured on this deployment.',
-      '<div class="notice warn"><b>ADMIN_SETUP_TOKEN is not configured.</b><br>Add it in Vercel → Settings → Environment Variables, redeploy, then reload this page.</div>' +
+    authShell('Signup is locked', 'Break-glass administrator signup is not available.',
+      '<div class="notice warn"><b>Signup stays closed unless a super admin enables it and ADMIN_SETUP_TOKEN is configured.</b><br>Use an existing administrator account to create additional admins from the Administrators page.</div>' +
       '<p class="tiny"><a href="/admin" style="color:inherit">Back to sign in</a></p>'
     );
     return;
   }
-  authShell('Create an administrator', 'Choose an email address and password. The setup token comes from your Vercel environment.',
+  authShell('Create an administrator', 'Token-gated break-glass enrollment for a super admin. A super admin must leave it enabled.',
     '<form id="signup-form">' +
       '<label class="field"><span>One-time setup token</span><input class="input" id="signup-token" type="password" autocomplete="off" required></label>' +
+      '<label class="field"><span>Full name</span><input class="input" id="signup-name" type="text" autocomplete="name" required maxlength="60" placeholder="Your name"></label>' +
       '<label class="field"><span>Email address</span><input class="input" id="signup-email" type="email" autocomplete="username" required maxlength="254" placeholder="you@example.com"></label>' +
-      '<label class="field"><span>Password (12+ characters)</span><input class="input" id="signup-password" type="password" autocomplete="new-password" required minlength="12" maxlength="128"></label>' +
+      passwordField('signup-password', 'Password (12+ characters)', { autocomplete:'new-password', min:12 }) +
+      passwordField('signup-confirm', 'Confirm password', { autocomplete:'new-password', min:12 }) +
       '<div class="error-box" id="signup-error" style="display:none"></div>' +
-      '<button class="btn primary" id="signup-submit" type="submit">Create administrator</button>' +
-      '<p class="tiny" style="margin-top:12px"><a href="/admin" style="color:inherit">Back to sign in</a></p>' +
+      '<button class="btn primary" id="signup-submit" type="submit">Create Account</button>' +
+      '<div class="auth-links"><button type="button" id="signup-back">Back to sign in</button></div>' +
     '</form>'
   );
+  $('#signup-back').addEventListener('click', () => { location.href = '/admin'; });
   $('#signup-form').addEventListener('submit', async event => {
     event.preventDefault();
     var button = $('#signup-submit'), errorBox = $('#signup-error');
-    errorBox.style.display = 'none'; button.disabled = true; button.textContent = 'Creating…';
+    errorBox.style.display = 'none';
+    if (passwordMismatch('signup-password', 'signup-confirm', errorBox)) return;
+    button.disabled = true; button.textContent = 'Creating…';
     try {
-      var data = await api('/v1/admin/signup', {
+      await api('/v1/admin/signup', {
         method: 'POST',
         headers: { 'x-setup-token': $('#signup-token').value.trim() },
         body: {
+          displayName: $('#signup-name').value.trim(),
           email: $('#signup-email').value.trim(),
-          password: $('#signup-password').value
+          password: $('#signup-password').value,
+          confirmPassword: $('#signup-confirm').value
         }
       });
       authShell('Administrator created', 'Sign in with the email address and password you just chose.',
-        '<div class="notice ok">Your account is ready. No authenticator app is needed.</div>' +
+        '<div class="notice ok">Your account is ready. Sign in to continue.</div>' +
         '<button class="btn primary" id="signup-continue" style="margin-top:14px">Go to sign in</button>'
       );
       $('#signup-continue').addEventListener('click', () => {
@@ -503,7 +592,85 @@ function showSignup(bootstrap){
       });
     } catch (error) {
       errorBox.textContent = error.message; errorBox.style.display = 'block';
-      button.disabled = false; button.textContent = 'Create administrator';
+      button.disabled = false; button.textContent = 'Create Account';
+    }
+  });
+}
+
+function showForgot(){
+  state.admin = null; state.csrf = null; state.reset = null;
+  authShell('Forgot password', 'Enter your administrator email address and the setup token.',
+    '<form id="forgot-form">' +
+      '<label class="field"><span>Email address</span><input class="input" id="forgot-email" type="text" inputmode="email" autocomplete="username" required maxlength="254" placeholder="you@example.com"></label>' +
+      '<label class="field"><span>One-time setup token</span><input class="input" id="forgot-token" type="password" autocomplete="off" required></label>' +
+      '<div class="error-box" id="forgot-error" style="display:none"></div>' +
+      '<button class="btn primary" id="forgot-submit" type="submit">Continue</button>' +
+      '<div class="auth-links"><button type="button" id="forgot-back">Back to sign in</button></div>' +
+    '</form>' +
+    '<div class="notice" style="margin-top:14px">No email provider is configured. If the token is valid, a one-time reset token is shown on the next screen. Copy it before continuing.</div>'
+  );
+  $('#forgot-back').addEventListener('click', () => { location.href = '/admin'; });
+  $('#forgot-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    var button = $('#forgot-submit'), errorBox = $('#forgot-error');
+    errorBox.style.display = 'none'; button.disabled = true; button.textContent = 'Checking…';
+    try {
+      var data = await api('/v1/admin/auth/reset/request', {
+        method:'POST', allow401:true,
+        headers:{ 'x-setup-token': $('#forgot-token').value.trim() },
+        body:{ email: $('#forgot-email').value.trim() }
+      });
+      state.reset = { email: data.email, token: data.resetToken, expiresAt: data.expiresAt };
+      showReset();
+    } catch (error) {
+      errorBox.textContent = error.message; errorBox.style.display = 'block';
+      button.disabled = false; button.textContent = 'Continue';
+    }
+  });
+}
+
+function showReset(){
+  if (!state.reset) return showForgot();
+  authShell('Set a new password', 'Copy the one-time token, then choose a new administrator password.',
+    '<div class="secret-box"><div class="tiny" style="margin-bottom:6px">One-time reset token · expires ' + h(fmtAt(state.reset.expiresAt)) + '</div>' +
+      '<div class="mono" id="reset-token-display">' + h(state.reset.token) + '</div>' +
+      '<button class="btn small" id="reset-copy" type="button" data-copy-target="reset-token-display" style="margin-top:10px">Copy token</button>' +
+    '</div>' +
+    '<form id="reset-form">' +
+      '<label class="field"><span>Email address</span><input class="input" id="reset-email" type="text" inputmode="email" autocomplete="username" value="' + h(state.reset.email) + '" required maxlength="254" readonly></label>' +
+      passwordField('reset-password', 'New password (12+ characters)', { autocomplete:'new-password', min:12 }) +
+      passwordField('reset-confirm', 'Confirm password', { autocomplete:'new-password', min:12 }) +
+      '<div class="error-box" id="reset-error" style="display:none"></div>' +
+      '<button class="btn primary" id="reset-submit" type="submit">Set new password</button>' +
+      '<div class="auth-links"><button type="button" id="reset-back">Back to sign in</button></div>' +
+    '</form>'
+  );
+  $('#reset-back').addEventListener('click', () => { location.href = '/admin'; });
+  $('#reset-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    var button = $('#reset-submit'), errorBox = $('#reset-error');
+    errorBox.style.display = 'none';
+    if (passwordMismatch('reset-password', 'reset-confirm', errorBox)) return;
+    button.disabled = true; button.textContent = 'Saving…';
+    try {
+      await api('/v1/admin/auth/reset/confirm', {
+        method:'POST', allow401:true,
+        body: {
+          token: state.reset.token,
+          email: $('#reset-email').value.trim(),
+          newPassword: $('#reset-password').value,
+          confirmPassword: $('#reset-confirm').value
+        }
+      });
+      state.reset = null;
+      authShell('Password updated', 'All existing sessions for this administrator were revoked.',
+        '<div class="notice ok">Sign in with your new password.</div>' +
+        '<button class="btn primary" id="reset-continue" style="margin-top:14px">Go to sign in</button>'
+      );
+      $('#reset-continue').addEventListener('click', () => { history.replaceState(null, '', '/admin'); showLogin(); });
+    } catch (error) {
+      errorBox.textContent = error.message; errorBox.style.display = 'block';
+      button.disabled = false; button.textContent = 'Set new password';
     }
   });
 }
@@ -952,7 +1119,10 @@ async function auditView(){
   $('#audit-next').addEventListener('click', () => { state.auditPage += 1; auditView(); });
 }
 async function adminsView(){
-  const data = await api('/v1/admin/admins');
+  const [data, registrationData] = await Promise.all([
+    api('/v1/admin/admins'),
+    api('/v1/admin/registration')
+  ]);
   const main = $('#main');
   main.innerHTML = '<div class="grid two"><section class="panel"><h2>Administrators</h2><p class="hint">Super admin privileges are required to manage access.</p>' +
     '<div class="table-wrap"><table><thead><tr><th>Account</th><th>Role</th><th>Status</th><th>Last login</th><th></th></tr></thead><tbody>' +
@@ -962,18 +1132,47 @@ async function adminsView(){
       (admin.id !== state.admin.id ? '<button class="btn small danger" data-delete-admin="' + h(admin.id) + '" data-admin-name="' + h(admin.username) + '">Delete</button>' : '') +
       '</td></tr>').join('') +
     '</tbody></table></div></section>' +
-    '<section class="panel"><h2>Add administrator</h2><p class="hint">They sign in with this email address and password.</p><form id="admin-form">' +
+    '<section class="panel"><h2>Add administrator</h2><p class="hint">Only super admins can create additional administrators.</p><form id="admin-form">' +
+      '<label class="field"><span>Full name</span><input class="input" id="adm-name" type="text" required maxlength="60" autocomplete="name" placeholder="Full name"></label>' +
       '<label class="field"><span>Email address</span><input class="input" id="adm-email" type="email" required maxlength="254" placeholder="you@example.com"></label>' +
-      '<label class="field"><span>Password (12+ characters)</span><input class="input" id="adm-password" type="password" required minlength="12" maxlength="128" autocomplete="new-password"></label>' +
+      passwordField('adm-password', 'Password (12+ characters)', { autocomplete:'new-password', min:12 }) +
+      passwordField('adm-confirm', 'Confirm password', { autocomplete:'new-password', min:12 }) +
       '<label class="field"><span>Role</span><select id="adm-role"><option value="admin">Admin — operations</option><option value="support">Support — user assistance</option><option value="analyst">Analyst — read-only</option><option value="super_admin">Super admin — full control</option></select></label>' +
-      '<button class="btn primary" type="submit">Create administrator</button></form></section></div>';
+      '<div class="error-box" id="adm-error" style="display:none"></div>' +
+      '<button class="btn primary" type="submit">Create administrator</button></form></section>' +
+    '<section class="panel"><h2>Registration control</h2><p class="hint">Break-glass signup stays off unless you explicitly enable it.</p>' +
+      '<div class="notice' + (registrationData.signupAvailable ? ' warn' : '') + '">' +
+        '<b>Token-gated signup is ' + (registrationData.signupAvailable ? 'enabled' : 'disabled') + '.</b><br>' +
+        (registrationData.registration.updatedAt ? 'Updated ' + h(fmtAt(registrationData.registration.updatedAt)) + '. ' : '') +
+        'Only someone holding ADMIN_SETUP_TOKEN can use it, never an ordinary app user.' +
+      '</div>' +
+      '<button class="btn ' + (registrationData.signupAvailable ? 'danger' : 'primary') + '" id="registration-toggle" type="button" data-enabled="' + (registrationData.signupAvailable ? '1' : '0') + '">' +
+        (registrationData.signupAvailable ? 'Disable public registration' : 'Enable token-gated signup') +
+      '</button></section></div>';
   $('#admin-form').addEventListener('submit', async event => {
     event.preventDefault();
+    var errorBox = $('#adm-error');
+    errorBox.style.display = 'none';
+    if (passwordMismatch('adm-password', 'adm-confirm', errorBox)) return;
     try {
-      const created = await api('/v1/admin/admins', { method:'POST', body:{ email:$('#adm-email').value.trim(), password:$('#adm-password').value, role:$('#adm-role').value } });
+      const created = await api('/v1/admin/admins', { method:'POST', body:{
+        displayName: $('#adm-name').value.trim(),
+        email: $('#adm-email').value.trim(),
+        password: $('#adm-password').value,
+        confirmPassword: $('#adm-confirm').value,
+        role: $('#adm-role').value
+      }});
       openModal('<div class="modal-head"><div><h3>Administrator created</h3><p class="hint">' + h(created.email) + ' can now sign in with the password you set.</p></div><button class="icon-btn close" data-close>×</button></div>' +
         '<button class="btn primary" data-close>Done</button>');
       bindModalClose(); toast('Administrator created', 'ok'); await adminsView();
+    } catch (error) { errorBox.textContent = error.message; errorBox.style.display = 'block'; }
+  });
+  $('#registration-toggle').addEventListener('click', async () => {
+    var enabled = $('#registration-toggle').dataset.enabled === '1';
+    try {
+      await api('/v1/admin/registration', { method:'PUT', body:{ signupEnabled: !enabled } });
+      toast(enabled ? 'Registration disabled' : 'Token-gated signup enabled', 'ok');
+      await adminsView();
     } catch (error) { toast(error.message, 'bad'); }
   });
   $$('[data-toggle-admin]').forEach(button => button.addEventListener('click', async () => {
@@ -996,18 +1195,27 @@ async function accountView(){
   const sessions = await api('/v1/admin/sessions');
   const main = $('#main');
   main.innerHTML = '<div class="grid two"><section class="panel"><h2>Change password</h2><p class="hint">Requires your current password. Other sessions are revoked.</p><form id="password-form">' +
-    '<label class="field"><span>Current password</span><input class="input" id="pwd-current" type="password" required autocomplete="current-password"></label>' +
-    '<label class="field"><span>New password (12+ characters)</span><input class="input" id="pwd-new" type="password" required minlength="12" autocomplete="new-password"></label>' +
+    passwordField('pwd-current', 'Current password', { autocomplete:'current-password' }) +
+    passwordField('pwd-new', 'New password (12+ characters)', { autocomplete:'new-password', min:12 }) +
+    passwordField('pwd-confirm', 'Confirm new password', { autocomplete:'new-password', min:12 }) +
+    '<div class="error-box" id="pwd-error" style="display:none"></div>' +
     '<button class="btn primary" type="submit">Update password</button></form></section>' +
     '<section class="panel"><h2>Active sessions</h2><p class="hint">Sessions are HttpOnly cookies bound to this browser.</p><div class="stack">' +
       sessions.sessions.map(session => '<div class="notice"><div class="row"><b>' + (session.current ? 'This session' : 'Session') + '</b><span class="grow"></span>' + (session.current ? '<span class="pill ok">current</span>' : '<button class="btn small danger" data-revoke="' + h(session.id) + '">Revoke</button>') + '</div><div class="tiny">Created ' + h(fmtAt(session.createdAt)) + ' · expires ' + h(fmtAt(session.expiresAt)) + '<br>' + h(session.userAgent || 'unknown browser') + ' · ' + h(session.ip || 'unknown IP') + '</div></div>').join('') +
     '</div></section></div>';
   $('#password-form').addEventListener('submit', async event => {
     event.preventDefault();
+    var errorBox = $('#pwd-error');
+    errorBox.style.display = 'none';
+    if (passwordMismatch('pwd-new', 'pwd-confirm', errorBox)) return;
     try {
-      await api('/v1/admin/auth/password', { method:'POST', allow401:true, body:{ currentPassword:$('#pwd-current').value, newPassword:$('#pwd-new').value } });
+      await api('/v1/admin/auth/password', { method:'POST', allow401:true, body:{
+        currentPassword: $('#pwd-current').value,
+        newPassword: $('#pwd-new').value,
+        confirmPassword: $('#pwd-confirm').value
+      }});
       toast('Password updated. Other sessions revoked.', 'ok'); await accountView();
-    } catch (error) { toast(error.message, 'bad'); }
+    } catch (error) { errorBox.textContent = error.message; errorBox.style.display = 'block'; }
   });
   $$('[data-revoke]').forEach(button => button.addEventListener('click', async () => {
     try { await api('/v1/admin/sessions/' + encodeURIComponent(button.dataset.revoke), { method:'DELETE' }); toast('Session revoked', 'ok'); await accountView(); }

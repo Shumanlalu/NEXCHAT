@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID, scryptSync } from "node:crypto";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -16,6 +16,8 @@ const DEVICE = "cccccccc-2222-4222-8222-222222222222";
 const NEX_ID = "NX-CCCC-CCCC";
 const KEY = Buffer.from("admin-test-key-material").toString("base64");
 const SETUP_TOKEN = "admin-setup-token-for-tests-only";
+const TEST_PASSWORD = "AdminPassword-123";
+const NEW_PASSWORD = "FreshAdminPassword-456";
 
 const config: AppConfig = {
   env: "test",
@@ -44,6 +46,8 @@ let db: Database;
 let userToken: string;
 let cookie = "";
 let csrf = "";
+let legacyCookie = "";
+let legacyCsrf = "";
 
 function cookiePair(setCookie: string | string[] | undefined): string {
   const value = Array.isArray(setCookie) ? setCookie[0] : setCookie;
@@ -53,6 +57,20 @@ function cookiePair(setCookie: string | string[] | undefined): string {
 
 function adminHeaders(extra: Record<string, string> = {}): Record<string, string> {
   return { cookie, "x-admin-csrf": csrf, ...extra };
+}
+
+function legacyScryptHash(password: string): { hash: string; salt: string } {
+  const salt = randomBytes(16);
+  const derived = scryptSync(password.normalize("NFKC"), salt, 64, {
+    N: 32768,
+    r: 8,
+    p: 2,
+    maxmem: 64 * 1024 * 1024,
+  });
+  return {
+    hash: derived.toString("base64"),
+    salt: Buffer.concat([salt, Buffer.from([1])]).toString("base64"),
+  };
 }
 
 describe("super admin panel", () => {
@@ -95,13 +113,20 @@ describe("super admin panel", () => {
       setupRequired: true,
       setupEnabled: true,
       signupEnabled: true,
+      sessionHours: 12,
+      rememberDays: 30,
     });
 
     const rejected = await app.inject({
       method: "POST",
       url: "/v1/admin/setup",
       headers: { "x-setup-token": "wrong" },
-      payload: { email: "rootadmin@example.com", displayName: "Root Admin", password: "AdminPassword-123" },
+      payload: {
+        displayName: "Root Admin",
+        email: "rootadmin@example.com",
+        password: TEST_PASSWORD,
+        confirmPassword: TEST_PASSWORD,
+      },
     });
     assert.equal(rejected.statusCode, 403);
 
@@ -109,7 +134,12 @@ describe("super admin panel", () => {
       method: "POST",
       url: "/v1/admin/setup",
       headers: { "x-setup-token": SETUP_TOKEN },
-      payload: { email: "rootadmin@example.com", displayName: "Root Admin", password: "AdminPassword-123" },
+      payload: {
+        displayName: "Root Admin",
+        email: "rootadmin@example.com",
+        password: TEST_PASSWORD,
+        confirmPassword: TEST_PASSWORD,
+      },
     });
     assert.equal(created.statusCode, 201);
     const body = created.json() as { email: string; username: string };
@@ -120,9 +150,17 @@ describe("super admin panel", () => {
       method: "POST",
       url: "/v1/admin/setup",
       headers: { "x-setup-token": SETUP_TOKEN },
-      payload: { email: "second@example.com", displayName: "Second", password: "AdminPassword-123" },
+      payload: {
+        displayName: "Second",
+        email: "second@example.com",
+        password: TEST_PASSWORD,
+        confirmPassword: TEST_PASSWORD,
+      },
     });
     assert.equal(again.statusCode, 409);
+
+    const afterSetup = await app.inject({ method: "GET", url: "/v1/admin/bootstrap" });
+    assert.equal((afterSetup.json() as { signupEnabled: boolean }).signupEnabled, false);
   });
 
   it("logs in with email and password and sets a hardened cookie", async () => {
@@ -138,7 +176,7 @@ describe("super admin panel", () => {
       url: "/v1/admin/auth/login",
       payload: {
         email: "rootadmin@example.com",
-        password: "AdminPassword-123",
+        password: TEST_PASSWORD,
       },
     });
     assert.equal(response.statusCode, 200);
@@ -150,6 +188,7 @@ describe("super admin panel", () => {
     const raw = Array.isArray(setCookie) ? setCookie[0]! : String(setCookie);
     assert.match(raw, /HttpOnly/);
     assert.match(raw, /SameSite=Strict/);
+    assert.match(raw, /Max-Age=43200/);
     cookie = cookiePair(setCookie);
 
     const me = await app.inject({
@@ -161,24 +200,47 @@ describe("super admin panel", () => {
     assert.equal((me.json() as { admin: { username: string } }).admin.username, "rootadmin@example.com");
   });
 
-  it("keeps existing username-only admins able to sign in with a password", async () => {
-    const existing = await db.one<{ password_hash: string; password_salt: string }>(
-      "SELECT password_hash, password_salt FROM admin_users WHERE username = $1",
-      ["rootadmin@example.com"],
-    );
-    assert.ok(existing);
+  it("extends the cookie lifetime when remember me is selected", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/login",
+      payload: {
+        email: "rootadmin@example.com",
+        password: TEST_PASSWORD,
+        remember: true,
+      },
+    });
+    assert.equal(response.statusCode, 200);
+    const raw = Array.isArray(response.headers["set-cookie"])
+      ? response.headers["set-cookie"]![0]!
+      : String(response.headers["set-cookie"]);
+    assert.match(raw, /Max-Age=2592000/);
+    const expiresAt = (response.json() as { expiresAt: string }).expiresAt;
+    assert.ok(new Date(expiresAt).getTime() > Date.now() + 29 * 86_400_000);
+  });
+
+  it("upgrades legacy scrypt admins to bcrypt while keeping legacy usernames usable", async () => {
+    const legacy = legacyScryptHash(TEST_PASSWORD);
     await db.query(
       `INSERT INTO admin_users
          (id, username, display_name, password_hash, password_salt, totp_secret_enc, role)
        VALUES ($1,$2,$3,$4,$5,'not-used','admin')`,
-      [randomUUID(), "legacyadmin", "Legacy Admin", existing.password_hash, existing.password_salt],
+      [randomUUID(), "legacyadmin", "Legacy Admin", legacy.hash, legacy.salt],
     );
     const login = await app.inject({
       method: "POST",
       url: "/v1/admin/auth/login",
-      payload: { email: "legacyadmin", password: "AdminPassword-123" },
+      payload: { email: "legacyadmin", password: TEST_PASSWORD },
     });
     assert.equal(login.statusCode, 200);
+    legacyCookie = cookiePair(login.headers["set-cookie"]);
+    legacyCsrf = (login.json() as { csrfToken: string }).csrfToken;
+    const row = await db.one<{ password_hash: string; password_salt: string }>(
+      "SELECT password_hash, password_salt FROM admin_users WHERE username = $1",
+      ["legacyadmin"],
+    );
+    assert.equal(row?.password_salt, "bcrypt-sha256:v1");
+    assert.match(row?.password_hash ?? "", /^\$2[aby]\$/);
   });
 
   it("rejects a mutation without the CSRF token", async () => {
@@ -196,6 +258,36 @@ describe("super admin panel", () => {
       },
     });
     assert.equal(response.statusCode, 403);
+  });
+
+  it("blocks sessions without admin rights and non-super admins from registration control", async () => {
+    const anonymous = await app.inject({
+      method: "GET",
+      url: "/v1/admin/dashboard?range=7d",
+    });
+    assert.equal(anonymous.statusCode, 401);
+
+    const bearerOnly = await app.inject({
+      method: "GET",
+      url: "/v1/admin/registration",
+      headers: { authorization: `Bearer ${userToken}` },
+    });
+    assert.equal(bearerOnly.statusCode, 401);
+
+    const readOnly = await app.inject({
+      method: "GET",
+      url: "/v1/admin/registration",
+      headers: { cookie: legacyCookie },
+    });
+    assert.equal(readOnly.statusCode, 403);
+
+    const toggle = await app.inject({
+      method: "PUT",
+      url: "/v1/admin/registration",
+      headers: { cookie: legacyCookie, "x-admin-csrf": legacyCsrf },
+      payload: { signupEnabled: true },
+    });
+    assert.equal(toggle.statusCode, 403);
   });
 
   it("publishes remote config and returns it through the public endpoint", async () => {
@@ -302,9 +394,10 @@ describe("super admin panel", () => {
       url: "/v1/admin/admins",
       headers: adminHeaders(),
       payload: {
+        displayName: "Analyst One",
         email: "analyst1@example.com",
-        displayName: "Analyst",
         password: "AnalystPassword-123",
+        confirmPassword: "AnalystPassword-123",
         role: "analyst",
       },
     });
@@ -403,7 +496,7 @@ describe("super admin panel", () => {
     assert.ok(actions.includes("admin.deleted"));
   });
 
-  it("serves the admin SPA with a nonce-based CSP", async () => {
+  it("serves the admin SPA with the requested sign-in controls and nonce CSP", async () => {
     const response = await app.inject({ method: "GET", url: "/admin" });
     assert.equal(response.statusCode, 200);
     const csp = String(response.headers["content-security-policy"]);
@@ -411,13 +504,38 @@ describe("super admin panel", () => {
     assert.match(response.body, /NEXCHAT Super Admin/);
     assert.match(response.body, /nonce="[A-Za-z0-9+/=]+"/);
     assert.doesNotMatch(response.body, /__CSP_NONCE__/);
+    assert.match(response.body, /id="login-remember"/);
+    assert.match(response.body, /Forgot password\?/);
+    assert.match(response.body, /data-password-toggle/);
+    assert.match(response.body, /Create Account/);
+    assert.doesNotMatch(response.body, /Sign in with Google|Google Sign-In|google-auth-library/i);
   });
 
-  it("creates an additional admin through the token-gated signup page", async () => {
+  it("keeps token-gated signup closed until a super admin enables it", async () => {
     const payload = {
+      displayName: "Shuman Admin",
       email: "shuman@example.com",
-      password: "AdminPassword-123",
+      password: TEST_PASSWORD,
+      confirmPassword: TEST_PASSWORD,
     };
+    const closed = await app.inject({
+      method: "POST",
+      url: "/v1/admin/signup",
+      headers: { "x-setup-token": SETUP_TOKEN },
+      payload,
+    });
+    assert.equal(closed.statusCode, 403);
+    assert.equal((closed.json() as { error: { code: string } }).error.code, "SIGNUP_DISABLED");
+
+    const enabled = await app.inject({
+      method: "PUT",
+      url: "/v1/admin/registration",
+      headers: adminHeaders(),
+      payload: { signupEnabled: true },
+    });
+    assert.equal(enabled.statusCode, 200);
+    assert.equal((enabled.json() as { signupAvailable: boolean }).signupAvailable, true);
+
     const rejected = await app.inject({
       method: "POST",
       url: "/v1/admin/signup",
@@ -425,6 +543,14 @@ describe("super admin panel", () => {
       payload,
     });
     assert.equal(rejected.statusCode, 403);
+
+    const mismatch = await app.inject({
+      method: "POST",
+      url: "/v1/admin/signup",
+      headers: { "x-setup-token": SETUP_TOKEN },
+      payload: { ...payload, email: "mismatch@example.com", confirmPassword: "DifferentPassword-123" },
+    });
+    assert.equal(mismatch.statusCode, 400);
 
     const created = await app.inject({
       method: "POST",
@@ -436,10 +562,156 @@ describe("super admin panel", () => {
     const body = created.json() as { email: string; username: string };
     assert.equal(body.email, "shuman@example.com");
     assert.equal(body.username, "shuman@example.com");
-    const row = await db.one<{ role: string }>(
-      "SELECT role FROM admin_users WHERE username = $1",
+    const row = await db.one<{ role: string; display_name: string }>(
+      "SELECT role, display_name FROM admin_users WHERE username = $1",
       ["shuman@example.com"],
     );
     assert.equal(row?.role, "super_admin");
+    assert.equal(row?.display_name, "Shuman Admin");
+
+    const disabled = await app.inject({
+      method: "PUT",
+      url: "/v1/admin/registration",
+      headers: adminHeaders(),
+      payload: { signupEnabled: false },
+    });
+    assert.equal(disabled.statusCode, 200);
+    const closedAgain = await app.inject({
+      method: "POST",
+      url: "/v1/admin/signup",
+      headers: { "x-setup-token": SETUP_TOKEN },
+      payload: { ...payload, email: "another@example.com" },
+    });
+    assert.equal(closedAgain.statusCode, 403);
+  });
+
+  it("resets a forgotten password with the setup token and revokes old sessions", async () => {
+    const existingLogin = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/login",
+      payload: { email: "shuman@example.com", password: TEST_PASSWORD },
+    });
+    assert.equal(existingLogin.statusCode, 200);
+    const oldCookie = cookiePair(existingLogin.headers["set-cookie"]);
+
+    const wrongToken = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/reset/request",
+      headers: { "x-setup-token": "wrong" },
+      payload: { email: "shuman@example.com" },
+    });
+    assert.equal(wrongToken.statusCode, 403);
+
+    const request = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/reset/request",
+      headers: { "x-setup-token": SETUP_TOKEN },
+      payload: { email: "shuman@example.com" },
+    });
+    assert.equal(request.statusCode, 200);
+    const requested = request.json() as { resetToken: string; expiresAt: string };
+    assert.ok(requested.resetToken.length >= 20);
+
+    const mismatch = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/reset/confirm",
+      payload: {
+        token: requested.resetToken,
+        email: "shuman@example.com",
+        newPassword: NEW_PASSWORD,
+        confirmPassword: "DifferentPassword-789",
+      },
+    });
+    assert.equal(mismatch.statusCode, 400);
+
+    const confirmed = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/reset/confirm",
+      payload: {
+        token: requested.resetToken,
+        email: "shuman@example.com",
+        newPassword: NEW_PASSWORD,
+        confirmPassword: NEW_PASSWORD,
+      },
+    });
+    assert.equal(confirmed.statusCode, 200);
+
+    const revoked = await app.inject({
+      method: "GET",
+      url: "/v1/admin/auth/me",
+      headers: { cookie: oldCookie },
+    });
+    assert.equal(revoked.statusCode, 401);
+
+    const reused = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/reset/confirm",
+      payload: {
+        token: requested.resetToken,
+        email: "shuman@example.com",
+        newPassword: NEW_PASSWORD,
+        confirmPassword: NEW_PASSWORD,
+      },
+    });
+    assert.equal(reused.statusCode, 400);
+
+    const oldPassword = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/login",
+      payload: { email: "shuman@example.com", password: TEST_PASSWORD },
+    });
+    assert.equal(oldPassword.statusCode, 401);
+
+    const newPassword = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/login",
+      payload: { email: "shuman@example.com", password: NEW_PASSWORD },
+    });
+    assert.equal(newPassword.statusCode, 200);
+  });
+
+  it("logs out by revoking only the current session", async () => {
+    const login = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/login",
+      payload: { email: "shuman@example.com", password: NEW_PASSWORD },
+    });
+    assert.equal(login.statusCode, 200);
+    const sessionCookie = cookiePair(login.headers["set-cookie"]);
+    const sessionCsrf = (login.json() as { csrfToken: string }).csrfToken;
+
+    const logout = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/logout",
+      headers: { cookie: sessionCookie, "x-admin-csrf": sessionCsrf },
+    });
+    assert.equal(logout.statusCode, 200);
+    const afterLogout = await app.inject({
+      method: "GET",
+      url: "/v1/admin/auth/me",
+      headers: { cookie: sessionCookie },
+    });
+    assert.equal(afterLogout.statusCode, 401);
+
+    const mainStillValid = await app.inject({
+      method: "GET",
+      url: "/v1/admin/auth/me",
+      headers: { cookie },
+    });
+    assert.equal(mainStillValid.statusCode, 200);
+  });
+
+  it("rate limits repeated break-glass reset attempts", async () => {
+    let last;
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      last = await app.inject({
+        method: "POST",
+        url: "/v1/admin/auth/reset/request",
+        headers: { "x-setup-token": "wrong" },
+        payload: { email: "shuman@example.com" },
+      });
+    }
+    assert.equal(last?.statusCode, 429);
+    assert.equal((last!.json() as { error: { code: string } }).error.code, "RATE_LIMITED");
   });
 });

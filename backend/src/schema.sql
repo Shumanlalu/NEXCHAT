@@ -170,6 +170,19 @@ CREATE TABLE IF NOT EXISTS admin_sessions (
 );
 CREATE INDEX IF NOT EXISTS admin_sessions_admin_idx ON admin_sessions(admin_id);
 
+-- One-time password reset links. Only a SHA-256 hash of the raw token is stored.
+CREATE TABLE IF NOT EXISTS admin_password_resets (
+    id UUID PRIMARY KEY,
+    admin_id UUID NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    expires_at TIMESTAMPTZ NOT NULL,
+    used_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    ip TEXT
+);
+CREATE INDEX IF NOT EXISTS admin_password_resets_admin_idx ON admin_password_resets(admin_id);
+CREATE INDEX IF NOT EXISTS admin_password_resets_expiry_idx ON admin_password_resets(expires_at);
+
 CREATE TABLE IF NOT EXISTS admin_audit_logs (
     id BIGSERIAL PRIMARY KEY,
     admin_id UUID REFERENCES admin_users(id) ON DELETE SET NULL,

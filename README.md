@@ -159,11 +159,14 @@ CSS and JavaScript with a nonce-based Content Security Policy.
 
 Features:
 
-- Email ID and password sign-in, scrypt password hashing, HttpOnly
-  `SameSite=Strict` session cookies, HMAC CSRF tokens, and lockout after repeated
-  failures. No Google Authenticator, TOTP code, or QR scan is required. Existing
-  username-only admin rows keep working so an already-deployed panel is not
-  locked out by this change.
+- Email ID and password sign-in with show/hide password, Remember me, and a
+  setup-token password reset. New passwords use bcrypt (cost 12) with a SHA-256
+  prehash; existing scrypt rows are verified with their original parameters and
+  transparently upgraded on the next successful login. HttpOnly
+  `SameSite=Strict` cookies, HMAC CSRF tokens, and lockout after repeated failures
+  are preserved. No Google Sign-In, Google Authenticator, TOTP code, or QR scan
+  is required. Existing username-only admin rows keep working so an
+  already-deployed panel is not locked out by this change.
 - Role-based access: `super_admin`, `admin`, `analyst`, and `support`. Every
   sensitive action is written to an append-only audit log.
 - Real dashboard metrics from PostgreSQL: registrations, daily active users,
@@ -183,8 +186,8 @@ Configure the panel on Vercel (or in `.env` for Docker/local):
 
 | Variable | Purpose |
 | --- | --- |
-| `ADMIN_SETUP_TOKEN` | One-time secret for `POST /v1/admin/setup` and the break-glass `POST /v1/admin/signup`. Empty disables both. Setup closes permanently once an administrator exists. |
-| `ADMIN_SESSION_HOURS` | Admin session lifetime, default `12`, maximum `72`. |
+| `ADMIN_SETUP_TOKEN` | Bootstrap secret for `POST /v1/admin/setup`, break-glass `POST /v1/admin/signup`, and `POST /v1/admin/auth/reset/request`. Empty disables all three. Setup closes permanently once an administrator exists. |
+| `ADMIN_SESSION_HOURS` | Normal admin session lifetime, default `12`, maximum `72`. Remember me extends the cookie to 30 days. |
 | `CRON_SECRET` | Bearer token for `POST /v1/internal/heartbeat` (uptime sample plus retention cleanup). Vercel Cron sends it automatically. |
 
 Bootstrap on a fresh database:
@@ -196,28 +199,44 @@ npx vercel env add CRON_SECRET production
 npx vercel --prod --yes
 ```
 
-Open `https://nexchat-three.vercel.app/admin`, enter the setup token, choose an
+Open `https://nexchat-three.vercel.app/admin`, enter the setup token, full name,
 email ID and password, then sign in with them. Nothing is shown to scan or enter
 in an authenticator app. After the first administrator exists, setup returns
-`409` even if the bootstrap token remains configured; you can remove the
-variable and redeploy.
+`409` even if the bootstrap token remains configured, and break-glass signup is
+**disabled by default**.
 
-### Creating another admin / recovering a locked-out account
+### Creating another admin
 
-The first-run setup page closes permanently, so a sole admin who loses their
-password can use the token-gated signup page instead:
+Ordinary NEXCHAT users cannot register as administrators. A signed-in super
+admin opens **Administrators** in the panel, enters the new admin's full name,
+email and password, and chooses a role. `POST /v1/admin/admins` requires the
+`admins.manage` permission, a valid CSRF token, and writes an `admin.created`
+audit entry.
 
-1. Open `https://nexchat-three.vercel.app/admin/signup` (also linked as
-   "Lost access?" from the sign-in page).
-2. Enter the `ADMIN_SETUP_TOKEN` value, choose an email ID and password.
-3. Sign in with that same email ID and password.
+If a super admin needs temporary break-glass enrollment, use the
+**Registration control** card on the same page to enable token-gated signup.
+Only while it is enabled, and only with the `ADMIN_SETUP_TOKEN`, can
+`https://nexchat-three.vercel.app/admin/signup` create another super admin. Turn
+it off again immediately; the setting is stored in `app_settings` and survives
+redeployments.
 
-`POST /v1/admin/signup` is rate limited and writes an `admin.signup.completed`
-audit entry. It only **adds** a super admin; it does not reset or disable an
-existing one. Treat `ADMIN_SETUP_TOKEN` as a break-glass credential and remove it
-from Vercel once you are back in if you no longer need it. Because the password
-is now the only factor, use a long, unique password and keep the setup token
-private.
+### Recovering a locked-out account
+
+The sign-in page's **Forgot password?** link opens `/admin/forgot`:
+
+1. Enter the administrator email (legacy usernames still work) and the
+   `ADMIN_SETUP_TOKEN` value.
+2. Copy the one-time reset token shown on screen. No email provider is
+   configured, so the token is deliberately not sent by email.
+3. Enter a new password and confirm it. All sessions for that administrator are
+   revoked.
+
+`POST /v1/admin/auth/reset/request` and `/reset/confirm` are rate limited and
+audited. Reset tokens are stored only as SHA-256 hashes, expire after 15
+minutes, and are single-use. Treat `ADMIN_SETUP_TOKEN` as a break-glass
+credential and remove it from Vercel if you no longer need recovery. Because the
+password is the only factor, use a long, unique password and keep the setup
+token private.
 
 Vercel Hobby allows one cron run per day, so `backend/vercel.json` schedules the
 heartbeat and retention job daily at 03:00 UTC. On Vercel Pro, change the

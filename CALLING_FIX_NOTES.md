@@ -100,6 +100,16 @@ as priority envelopes.
    out. CSRF tokens, HttpOnly cookies, lockout, RBAC, and audit logging are
    unchanged (`admin-auth.ts`, `admin-config.ts`, `admin/security.ts`, `ui.html`).
 
+10. **The admin auth UX and password storage needed a full upgrade.** The panel
+   now has show/hide passwords, Remember me (30-day session), a setup-token
+   forgot-password flow, full name and confirm password fields, responsive
+   light/dark animations, and a super-admin toggle that keeps break-glass
+   registration disabled by default. New passwords use bcrypt with a SHA-256
+   prehash; legacy scrypt hashes verify and upgrade on login. No Google OAuth,
+   Google Sign-In dependency, TOTP, or QR enrollment exists in the live backend
+   (`admin-auth.ts`, `admin-config.ts`, `registration.ts`, `passwords.ts`,
+   `schema.sql`, `ui.html`, `create-app.ts`).
+
 ## Modified files
 
 ### Android
@@ -123,8 +133,10 @@ as priority envelopes.
 - `backend/src/routes/admin-config.ts`
 - `backend/src/routes/admin-core.ts`
 - `backend/src/admin/security.ts`
+- `backend/src/admin/registration.ts`
 - `backend/src/admin/ui.html`
 - `backend/src/admin/qr.ts` (removed with the QR dependency)
+- `backend/src/security/passwords.ts`
 - `backend/src/ws/hub.ts`
 - `backend/src/create-app.ts`
 - `backend/vercel.json`

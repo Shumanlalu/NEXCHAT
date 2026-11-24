@@ -7,6 +7,8 @@ import { HttpError } from "../http";
 export const ADMIN_COOKIE = "nexchat_admin_session";
 export const ADMIN_SESSION_SECONDS = 12 * 60 * 60;
 export const ADMIN_SESSION_MILLIS = ADMIN_SESSION_SECONDS * 1000;
+export const ADMIN_REMEMBER_SECONDS = 30 * 24 * 60 * 60;
+export const ADMIN_MAX_SESSION_SECONDS = 72 * 60 * 60;
 
 export type AdminRole = "super_admin" | "admin" | "analyst" | "support";
 

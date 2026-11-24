@@ -4,7 +4,12 @@ import type { AppConfig } from "../config";
 import type { Database } from "../db";
 import { HttpError, requireAuth, type DeviceRow, type UserRow } from "../http";
 import { generateNexId } from "../security/ids";
-import { hashPassword, validatePassword, verifyPassword } from "../security/passwords";
+import {
+  hashPassword,
+  usesLegacyPasswordHash,
+  validatePassword,
+  verifyPassword,
+} from "../security/passwords";
 import { hashToken, type TokenService } from "../security/tokens";
 import { loginSchema, parseWith, refreshSchema, registerSchema, type deviceSchema } from "../validation";
 import type { z } from "zod";
@@ -279,6 +284,14 @@ export async function registerAuthRoutes(app: FastifyInstance, deps: AuthDeps): 
     }
     const valid = await verifyPassword(body.password, user.password_hash, user.password_salt);
     if (!valid) throw new HttpError(401, "INVALID_CREDENTIALS", "Incorrect username or password");
+    if (usesLegacyPasswordHash(user.password_hash, user.password_salt)) {
+      const upgraded = await hashPassword(body.password);
+      await db.query("UPDATE users SET password_hash = $1, password_salt = $2 WHERE id = $3", [
+        upgraded.hash,
+        upgraded.salt,
+        user.id,
+      ]);
+    }
 
     try {
       await insertDevice(db, user.id, body.device, true);
