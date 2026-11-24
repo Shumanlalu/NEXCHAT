@@ -23,9 +23,10 @@ val localProps = Properties().apply {
     }
 }
 
-// Release builds bake in the operator's HTTPS server. Keep this out of the
+// All builds bake in the operator's HTTPS server. Keep this out of the
 // repository by setting NEXCHAT_SERVER_URL in android/local.properties or the
-// environment when building.
+// environment when building. Debug keeps an emulator fallback only when no URL
+// is configured, so a shared debug APK never points at localhost.
 val configuredServerUrl = (
     localProps.getProperty("NEXCHAT_SERVER_URL")
         ?: System.getenv("NEXCHAT_SERVER_URL")
@@ -37,11 +38,14 @@ if (configuredServerUrl.isNotBlank() && !configuredServerUrl.startsWith("https:/
 }
 
 if (configuredServerUrl.isBlank()) {
-    logger.warn("NEXCHAT_SERVER_URL is not set; the release APK will not connect to a server.")
+    logger.warn("NEXCHAT_SERVER_URL is not set; APKs will not connect to a server unless it is set later.")
 }
 
 val configuredServerUrlLiteral =
     "\"" + configuredServerUrl.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+val debugServerUrlLiteral =
+    if (configuredServerUrl.isBlank()) "\"http://10.0.2.2:8080\"" else configuredServerUrlLiteral
 
 android {
     namespace = "com.nexchat.app"
@@ -92,7 +96,7 @@ android {
         debug {
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
-            buildConfigField("String", "DEFAULT_API_BASE_URL", "\"http://10.0.2.2:8080\"")
+            buildConfigField("String", "DEFAULT_API_BASE_URL", debugServerUrlLiteral)
             buildConfigField("boolean", "ALLOW_CLEARTEXT", "true")
         }
         release {
