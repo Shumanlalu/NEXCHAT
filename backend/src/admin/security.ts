@@ -1,11 +1,4 @@
-import {
-  createCipheriv,
-  createDecipheriv,
-  createHash,
-  createHmac,
-  randomBytes,
-  timingSafeEqual,
-} from "node:crypto";
+import { createCipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { FastifyRequest } from "fastify";
 import type { AppConfig } from "../config";
 import type { Database } from "../db";
@@ -113,6 +106,8 @@ export function publicAdmin(admin: AdminRow): Record<string, unknown> {
   return {
     id: admin.id,
     username: admin.username,
+    // Admin accounts are email-based now; keep both names for older clients.
+    email: admin.username,
     displayName: admin.display_name,
     role: admin.role,
     active: admin.active,
@@ -285,56 +280,10 @@ export function base32Encode(input: Buffer): string {
   return output;
 }
 
-export function base32Decode(input: string): Buffer {
-  const clean = input.replace(/=+$/g, "").replace(/\s+/g, "").toUpperCase();
-  let bits = 0;
-  let value = 0;
-  const bytes: number[] = [];
-  for (const character of clean) {
-    const index = BASE32_ALPHABET.indexOf(character);
-    if (index < 0) throw new Error("Invalid base32 secret");
-    value = (value << 5) | index;
-    bits += 5;
-    if (bits >= 8) {
-      bytes.push((value >>> (bits - 8)) & 255);
-      bits -= 8;
-    }
-  }
-  return Buffer.from(bytes);
-}
-
+// Only used to fill the legacy NOT NULL column. It is never displayed,
+// verified, or required at sign-in.
 export function generateTotpSecret(): string {
   return base32Encode(randomBytes(20));
-}
-
-export function totpAt(secret: string, timestamp = Date.now()): string {
-  const counter = Math.floor(timestamp / 30_000);
-  const buffer = Buffer.alloc(8);
-  buffer.writeBigUInt64BE(BigInt(counter));
-  const digest = createHmac("sha1", base32Decode(secret)).update(buffer).digest();
-  const offset = digest[digest.length - 1]! & 0x0f;
-  const binary =
-    ((digest[offset]! & 0x7f) << 24) |
-    ((digest[offset + 1]! & 0xff) << 16) |
-    ((digest[offset + 2]! & 0xff) << 8) |
-    (digest[offset + 3]! & 0xff);
-  return String(binary % 1_000_000).padStart(6, "0");
-}
-
-export function verifyTotp(secret: string, code: string, timestamp = Date.now()): boolean {
-  const normalized = code.replace(/\s+/g, "");
-  if (!/^\d{6}$/.test(normalized)) return false;
-  for (const offset of [-1, 0, 1]) {
-    const expected = totpAt(secret, timestamp + offset * 30_000);
-    if (equalStrings(normalized, expected)) return true;
-  }
-  return false;
-}
-
-export function otpauthUri(username: string, secret: string): string {
-  const label = encodeURIComponent(`NEXCHAT Admin:${username}`);
-  const issuer = encodeURIComponent("NEXCHAT Admin");
-  return `otpauth://totp/${label}?secret=${secret}&issuer=${issuer}&algorithm=SHA1&digits=6&period=30`;
 }
 
 function encryptionKey(config: AppConfig): Buffer {
@@ -349,21 +298,4 @@ export function encryptTotpSecret(secret: string, config: AppConfig): string {
   const ciphertext = Buffer.concat([cipher.update(secret, "utf8"), cipher.final()]);
   const tag = cipher.getAuthTag();
   return `v1:${iv.toString("base64")}:${tag.toString("base64")}:${ciphertext.toString("base64")}`;
-}
-
-export function decryptTotpSecret(stored: string, config: AppConfig): string {
-  const [version, iv, tag, ciphertext] = stored.split(":");
-  if (version !== "v1" || !iv || !tag || !ciphertext) {
-    throw new Error("Unsupported TOTP secret format");
-  }
-  const decipher = createDecipheriv(
-    "aes-256-gcm",
-    encryptionKey(config),
-    Buffer.from(iv, "base64"),
-  );
-  decipher.setAuthTag(Buffer.from(tag, "base64"));
-  return Buffer.concat([
-    decipher.update(Buffer.from(ciphertext, "base64")),
-    decipher.final(),
-  ]).toString("utf8");
 }

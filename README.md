@@ -159,9 +159,11 @@ CSS and JavaScript with a nonce-based Content Security Policy.
 
 Features:
 
-- Password plus RFC 6238 TOTP sign-in, scrypt password hashing, encrypted TOTP
-  secrets, HttpOnly `SameSite=Strict` session cookies, HMAC CSRF tokens, and
-  lockout after repeated failures.
+- Email ID and password sign-in, scrypt password hashing, HttpOnly
+  `SameSite=Strict` session cookies, HMAC CSRF tokens, and lockout after repeated
+  failures. No Google Authenticator, TOTP code, or QR scan is required. Existing
+  username-only admin rows keep working so an already-deployed panel is not
+  locked out by this change.
 - Role-based access: `super_admin`, `admin`, `analyst`, and `support`. Every
   sensitive action is written to an append-only audit log.
 - Real dashboard metrics from PostgreSQL: registrations, daily active users,
@@ -181,7 +183,7 @@ Configure the panel on Vercel (or in `.env` for Docker/local):
 
 | Variable | Purpose |
 | --- | --- |
-| `ADMIN_SETUP_TOKEN` | One-time secret for `POST /v1/admin/setup`. Empty disables setup. Setup closes permanently once an administrator exists. |
+| `ADMIN_SETUP_TOKEN` | One-time secret for `POST /v1/admin/setup` and the break-glass `POST /v1/admin/signup`. Empty disables both. Setup closes permanently once an administrator exists. |
 | `ADMIN_SESSION_HOURS` | Admin session lifetime, default `12`, maximum `72`. |
 | `CRON_SECRET` | Bearer token for `POST /v1/internal/heartbeat` (uptime sample plus retention cleanup). Vercel Cron sends it automatically. |
 
@@ -194,30 +196,28 @@ npx vercel env add CRON_SECRET production
 npx vercel --prod --yes
 ```
 
-Open `https://nexchat-three.vercel.app/admin`, enter the setup token, and store
-the displayed authenticator secret before continuing. The secret is shown once.
-After the first administrator exists, setup returns `409` even if the bootstrap
-token remains configured; you can remove the variable and redeploy.
+Open `https://nexchat-three.vercel.app/admin`, enter the setup token, choose an
+email ID and password, then sign in with them. Nothing is shown to scan or enter
+in an authenticator app. After the first administrator exists, setup returns
+`409` even if the bootstrap token remains configured; you can remove the
+variable and redeploy.
 
 ### Creating another admin / recovering a locked-out account
 
 The first-run setup page closes permanently, so a sole admin who loses their
-password or authenticator can use the token-gated signup page instead:
+password can use the token-gated signup page instead:
 
 1. Open `https://nexchat-three.vercel.app/admin/signup` (also linked as
    "Lost access?" from the sign-in page).
-2. Enter the `ADMIN_SETUP_TOKEN` value and choose a username and password.
-3. Scan the displayed **QR code** with Google Authenticator, or copy the manual
-   secret, then sign in with that code.
-
-Every screen that reveals a TOTP secret — first-run setup, signup, **Add
-administrator**, and **Reset 2FA** — now renders an inline QR code. The image is
-generated on the server; the secret is never sent to a third-party QR service.
+2. Enter the `ADMIN_SETUP_TOKEN` value, choose an email ID and password.
+3. Sign in with that same email ID and password.
 
 `POST /v1/admin/signup` is rate limited and writes an `admin.signup.completed`
 audit entry. It only **adds** a super admin; it does not reset or disable an
 existing one. Treat `ADMIN_SETUP_TOKEN` as a break-glass credential and remove it
-from Vercel once you are back in if you no longer need it.
+from Vercel once you are back in if you no longer need it. Because the password
+is now the only factor, use a long, unique password and keep the setup token
+private.
 
 Vercel Hobby allows one cron run per day, so `backend/vercel.json` schedules the
 heartbeat and retention job daily at 03:00 UTC. On Vercel Pro, change the

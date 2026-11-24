@@ -6,12 +6,10 @@ import type { Database } from "../db";
 import { HttpError } from "../http";
 import { hashPassword, validatePassword } from "../security/passwords";
 import { parseWith } from "../validation";
-import { totpQrDataUri } from "../admin/qr";
 import {
   audit,
   encryptTotpSecret,
   generateTotpSecret,
-  otpauthUri,
   requireAdmin,
   verifyCsrf,
 } from "../admin/security";
@@ -40,12 +38,12 @@ const announcementSchema = z.object({
 const announcementPatchSchema = announcementSchema.partial();
 
 const adminCreateSchema = z.object({
-  username: z
+  email: z
     .string()
     .trim()
     .transform((value) => value.toLowerCase())
-    .pipe(z.string().regex(/^[a-z0-9_.-]{3,32}$/)),
-  displayName: z.string().trim().min(1).max(60),
+    .pipe(z.string().max(254).email("Enter a valid email address")),
+  displayName: z.string().trim().min(1).max(60).optional(),
   password: z.string().min(12).max(128),
   role: z.enum(["super_admin", "admin", "analyst", "support"]),
 });
@@ -232,38 +230,36 @@ export async function registerAdminConfigRoutes(
     if (passwordError) throw new HttpError(400, "WEAK_PASSWORD", passwordError);
     const existing = await db.one<{ id: string }>(
       "SELECT id FROM admin_users WHERE username = $1",
-      [body.username],
+      [body.email],
     );
     if (existing) throw new HttpError(409, "ADMIN_EXISTS", "That administrator already exists");
     const { hash, salt } = await hashPassword(body.password);
-    const secret = generateTotpSecret();
+    const unusedSecret = generateTotpSecret();
     const id = randomUUID();
+    const displayName = body.displayName?.trim() || body.email.split("@")[0] || body.email;
     await db.query(
       `INSERT INTO admin_users
          (id, username, display_name, password_hash, password_salt, totp_secret_enc, role)
        VALUES ($1,$2,$3,$4,$5,$6,$7)`,
       [
         id,
-        body.username,
-        body.displayName,
+        body.email,
+        displayName,
         hash,
         salt,
-        encryptTotpSecret(secret, config),
+        encryptTotpSecret(unusedSecret, config),
         body.role,
       ],
     );
     await audit(db, context.admin.id, "admin.created", request, "admin", id, {
-      username: body.username,
+      email: body.email,
       role: body.role,
     });
-    const uri = otpauthUri(body.username, secret);
     return reply.code(201).send({
       id,
-      username: body.username,
-      totpSecret: secret,
-      otpauthUri: uri,
-      qrDataUrl: await totpQrDataUri(uri),
-      message: "Give this secret to the administrator through a secure channel. It is shown once.",
+      email: body.email,
+      username: body.email,
+      message: "Administrator created. Give them this email and password through a secure channel.",
     });
   });
 
@@ -340,32 +336,4 @@ export async function registerAdminConfigRoutes(
     return reply.send({ ok: true });
   });
 
-  app.post("/v1/admin/admins/:id/reset-2fa", async (request, reply) => {
-    const context = await requireAdmin(request, db, config, "admins.manage");
-    verifyCsrf(request, context, config);
-    const { id } = request.params as { id: string };
-    const target = await db.one<Record<string, unknown>>(
-      "SELECT id, username FROM admin_users WHERE id = $1",
-      [id],
-    );
-    if (!target) throw new HttpError(404, "ADMIN_NOT_FOUND", "Administrator not found");
-    const secret = generateTotpSecret();
-    await db.query("UPDATE admin_users SET totp_secret_enc = $1 WHERE id = $2", [
-      encryptTotpSecret(secret, config),
-      id,
-    ]);
-    await db.query(
-      "UPDATE admin_sessions SET revoked_at = now() WHERE admin_id = $1 AND revoked_at IS NULL",
-      [id],
-    );
-    await audit(db, context.admin.id, "admin.2fa_reset", request, "admin", id, {
-      username: target.username,
-    });
-    const uri = otpauthUri(target.username as string, secret);
-    return reply.send({
-      totpSecret: secret,
-      otpauthUri: uri,
-      qrDataUrl: await totpQrDataUri(uri),
-    });
-  });
 }

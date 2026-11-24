@@ -93,6 +93,12 @@ as priority envelopes.
 8. **Admin dashboard "Recent calls" ignored the selected date range**, and admin logout
    did not verify CSRF. Both are fixed (`admin-core.ts`, `admin-auth.ts`).
 
+9. **Super admin sign-in required Google Authenticator/TOTP.** The panel now uses
+   email ID and password only. New admin accounts are created with an email ID;
+   existing username-only rows keep working so a deployed panel is not locked
+   out. CSRF tokens, HttpOnly cookies, lockout, RBAC, and audit logging are
+   unchanged (`admin-auth.ts`, `admin-config.ts`, `admin/security.ts`, `ui.html`).
+
 ## Modified files
 
 ### Android
@@ -113,10 +119,16 @@ as priority envelopes.
 - `backend/src/routes/messages.ts`
 - `backend/src/routes/analytics.ts`
 - `backend/src/routes/admin-auth.ts`
+- `backend/src/routes/admin-config.ts`
 - `backend/src/routes/admin-core.ts`
+- `backend/src/admin/security.ts`
+- `backend/src/admin/ui.html`
+- `backend/src/admin/qr.ts` (removed with the QR dependency)
 - `backend/src/ws/hub.ts`
 - `backend/src/create-app.ts`
 - `backend/vercel.json`
+- `backend/package.json` / `backend/package-lock.json`
+- `backend/test/admin.test.ts`
 - `backend/test/wait.test.ts`
 
 A pre-change copy of these files is in `CALL_FIX_BACKUP_20261123/`.
@@ -141,9 +153,10 @@ No credentials or secret values are stored in this repository.
 Run here:
 
 - `npm run typecheck` — passed.
-- `npm test` — 28/28 passed, including two new tests:
+- `npm test` — 30/30 passed, including:
   - priority call envelopes are delivered before older envelopes;
-  - simultaneous caller/callee call reports create one session row.
+  - simultaneous caller/callee call reports create one session row;
+  - email/password-only admin login and legacy username compatibility.
 - `./gradlew.bat assembleRelease` — see the final build output/status in this session.
 
 Not possible in this workspace:

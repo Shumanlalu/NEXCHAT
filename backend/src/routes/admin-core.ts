@@ -795,6 +795,7 @@ export async function registerAdminCoreRoutes(
       admins: rows.map((row) => ({
         id: row.id,
         username: row.username,
+        email: row.username,
         displayName: row.display_name,
         role: row.role,
         active: row.active,

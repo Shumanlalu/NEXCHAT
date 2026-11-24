@@ -10,7 +10,6 @@ import type { AppConfig } from "../src/config";
 import { buildApp } from "../src/create-app";
 import { Database } from "../src/db";
 import { TokenService } from "../src/security/tokens";
-import { totpAt } from "../src/admin/security";
 
 const USER = "cccccccc-2222-4222-8222-111111111111";
 const DEVICE = "cccccccc-2222-4222-8222-222222222222";
@@ -45,7 +44,6 @@ let db: Database;
 let userToken: string;
 let cookie = "";
 let csrf = "";
-let totpSecret = "";
 
 function cookiePair(setCookie: string | string[] | undefined): string {
   const value = Array.isArray(setCookie) ? setCookie[0] : setCookie;
@@ -103,7 +101,7 @@ describe("super admin panel", () => {
       method: "POST",
       url: "/v1/admin/setup",
       headers: { "x-setup-token": "wrong" },
-      payload: { username: "rootadmin", displayName: "Root Admin", password: "AdminPassword-123" },
+      payload: { email: "rootadmin@example.com", displayName: "Root Admin", password: "AdminPassword-123" },
     });
     assert.equal(rejected.statusCode, 403);
 
@@ -111,29 +109,27 @@ describe("super admin panel", () => {
       method: "POST",
       url: "/v1/admin/setup",
       headers: { "x-setup-token": SETUP_TOKEN },
-      payload: { username: "rootadmin", displayName: "Root Admin", password: "AdminPassword-123" },
+      payload: { email: "rootadmin@example.com", displayName: "Root Admin", password: "AdminPassword-123" },
     });
     assert.equal(created.statusCode, 201);
-    const body = created.json() as { totpSecret: string; otpauthUri: string; qrDataUrl: string };
-    assert.match(body.totpSecret, /^[A-Z2-7]{16,}$/);
-    assert.match(body.otpauthUri, /^otpauth:\/\/totp\//);
-    assert.match(body.qrDataUrl, /^data:image\/png;base64,/);
-    totpSecret = body.totpSecret;
+    const body = created.json() as { email: string; username: string };
+    assert.equal(body.email, "rootadmin@example.com");
+    assert.equal(body.username, "rootadmin@example.com");
 
     const again = await app.inject({
       method: "POST",
       url: "/v1/admin/setup",
       headers: { "x-setup-token": SETUP_TOKEN },
-      payload: { username: "second", displayName: "Second", password: "AdminPassword-123" },
+      payload: { email: "second@example.com", displayName: "Second", password: "AdminPassword-123" },
     });
     assert.equal(again.statusCode, 409);
   });
 
-  it("logs in with password plus TOTP and sets a hardened cookie", async () => {
+  it("logs in with email and password and sets a hardened cookie", async () => {
     const wrong = await app.inject({
       method: "POST",
       url: "/v1/admin/auth/login",
-      payload: { username: "rootadmin", password: "AdminPassword-123", code: "000000" },
+      payload: { email: "rootadmin@example.com", password: "WrongPassword-123" },
     });
     assert.equal(wrong.statusCode, 401);
 
@@ -141,9 +137,8 @@ describe("super admin panel", () => {
       method: "POST",
       url: "/v1/admin/auth/login",
       payload: {
-        username: "rootadmin",
+        email: "rootadmin@example.com",
         password: "AdminPassword-123",
-        code: totpAt(totpSecret),
       },
     });
     assert.equal(response.statusCode, 200);
@@ -163,7 +158,27 @@ describe("super admin panel", () => {
       headers: { cookie },
     });
     assert.equal(me.statusCode, 200);
-    assert.equal((me.json() as { admin: { username: string } }).admin.username, "rootadmin");
+    assert.equal((me.json() as { admin: { username: string } }).admin.username, "rootadmin@example.com");
+  });
+
+  it("keeps existing username-only admins able to sign in with a password", async () => {
+    const existing = await db.one<{ password_hash: string; password_salt: string }>(
+      "SELECT password_hash, password_salt FROM admin_users WHERE username = $1",
+      ["rootadmin@example.com"],
+    );
+    assert.ok(existing);
+    await db.query(
+      `INSERT INTO admin_users
+         (id, username, display_name, password_hash, password_salt, totp_secret_enc, role)
+       VALUES ($1,$2,$3,$4,$5,'not-used','admin')`,
+      [randomUUID(), "legacyadmin", "Legacy Admin", existing.password_hash, existing.password_salt],
+    );
+    const login = await app.inject({
+      method: "POST",
+      url: "/v1/admin/auth/login",
+      payload: { email: "legacyadmin", password: "AdminPassword-123" },
+    });
+    assert.equal(login.statusCode, 200);
   });
 
   it("rejects a mutation without the CSRF token", async () => {
@@ -287,21 +302,19 @@ describe("super admin panel", () => {
       url: "/v1/admin/admins",
       headers: adminHeaders(),
       payload: {
-        username: "analyst1",
+        email: "analyst1@example.com",
         displayName: "Analyst",
         password: "AnalystPassword-123",
         role: "analyst",
       },
     });
     assert.equal(created.statusCode, 201);
-    const analystSecret = (created.json() as { totpSecret: string }).totpSecret;
     const login = await app.inject({
       method: "POST",
       url: "/v1/admin/auth/login",
       payload: {
-        username: "analyst1",
+        email: "analyst1@example.com",
         password: "AnalystPassword-123",
-        code: totpAt(analystSecret),
       },
     });
     assert.equal(login.statusCode, 200);
@@ -337,7 +350,7 @@ describe("super admin panel", () => {
     });
     assert.equal(list.statusCode, 200);
     const admins = (list.json() as { admins: Array<{ id: string; username: string }> }).admins;
-    const analyst = admins.find((admin) => admin.username === "analyst1");
+    const analyst = admins.find((admin) => admin.username === "analyst1@example.com");
     assert.ok(analyst, "analyst should exist before deletion");
 
     const deleted = await app.inject({
@@ -353,15 +366,14 @@ describe("super admin panel", () => {
       headers: { cookie },
     });
     const remaining = (after.json() as { admins: Array<{ username: string }> }).admins;
-    assert.equal(remaining.some((admin) => admin.username === "analyst1"), false);
+    assert.equal(remaining.some((admin) => admin.username === "analyst1@example.com"), false);
 
     const relogin = await app.inject({
       method: "POST",
       url: "/v1/admin/auth/login",
       payload: {
-        username: "analyst1",
+        email: "analyst1@example.com",
         password: "AnalystPassword-123",
-        code: "000000",
       },
     });
     assert.equal(relogin.statusCode, 401);
@@ -403,8 +415,7 @@ describe("super admin panel", () => {
 
   it("creates an additional admin through the token-gated signup page", async () => {
     const payload = {
-      username: "shuman",
-      displayName: "Shuman",
+      email: "shuman@example.com",
       password: "AdminPassword-123",
     };
     const rejected = await app.inject({
@@ -422,12 +433,12 @@ describe("super admin panel", () => {
       payload,
     });
     assert.equal(created.statusCode, 201);
-    const body = created.json() as { username: string; totpSecret: string; qrDataUrl: string };
-    assert.equal(body.username, "shuman");
-    assert.match(body.qrDataUrl, /^data:image\/png;base64,/);
+    const body = created.json() as { email: string; username: string };
+    assert.equal(body.email, "shuman@example.com");
+    assert.equal(body.username, "shuman@example.com");
     const row = await db.one<{ role: string }>(
       "SELECT role FROM admin_users WHERE username = $1",
-      ["shuman"],
+      ["shuman@example.com"],
     );
     assert.equal(row?.role, "super_admin");
   });

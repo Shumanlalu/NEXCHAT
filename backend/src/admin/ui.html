@@ -322,7 +322,7 @@ function shell(title, subtitle, body){
       '<aside class="sidebar">' +
         '<div class="brand"><div class="mark">N</div><div>NEXCHAT<small>Super Admin</small></div></div>' +
         '<div class="nav-label">Operations</div>' + items +
-        '<div class="sidebar-foot">Encrypted messaging relay<br>Vercel + Neon PostgreSQL<br><span id="sidebar-admin">' + h(state.admin ? state.admin.username : '') + '</span></div>' +
+        '<div class="sidebar-foot">Encrypted messaging relay<br>Vercel + Neon PostgreSQL<br><span id="sidebar-admin">' + h(state.admin ? (state.admin.email || state.admin.username) : '') + '</span></div>' +
       '</aside>' +
       '<div class="main">' +
         '<header class="topbar">' +
@@ -352,7 +352,7 @@ function authShell(title, subtitle, body){
         '<div><div class="brand"><div class="mark">N</div><div>NEXCHAT<small>Super Admin</small></div></div>' +
         '<h1>Operate NEXCHAT with facts, not guesses.</h1>' +
         '<p>Live user, message, call and crash telemetry from your existing Vercel and Neon deployment. No sample numbers and no separate analytics service.</p>' +
-        '<ul><li>Two-factor authenticated administration</li><li>Role-based access with a full audit trail</li><li>Remote feature flags and announcements</li><li>CSV reports and printable summaries</li></ul></div>' +
+        '<ul><li>Email and password administration</li><li>Role-based access with a full audit trail</li><li>Remote feature flags and announcements</li><li>CSV reports and printable summaries</li></ul></div>' +
         '<div class="tiny">Encrypted communications stay private. This panel never exposes message content, keys or call media.</div>' +
       '</section>' +
       '<section class="auth-form"><div class="auth-card"><h2>' + h(title) + '</h2><p class="hint">' + h(subtitle) + '</p>' + body + '</div></section>' +
@@ -361,19 +361,6 @@ function authShell(title, subtitle, body){
 function showFatal(message){
   $('#app').innerHTML = '<div class="boot"><div style="max-width:520px;text-align:center"><div class="error-box">' + h(message) + '</div><button class="btn primary" id="fatal-retry">Retry</button></div></div>';
   $('#fatal-retry').addEventListener('click', () => location.reload());
-}
-function enrollmentHtml(data){
-  var qr = data.qrDataUrl
-    ? '<img src="' + h(data.qrDataUrl) + '" alt="Scan this QR code with your authenticator app" style="width:200px;height:200px;flex:0 0 200px;background:#fff;border-radius:12px;padding:8px">'
-    : '';
-  return '<div style="display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap;margin-bottom:14px">' + qr +
-    '<div style="flex:1;min-width:220px">' +
-      '<div class="tiny">Manual entry secret</div>' +
-      '<div class="mono" style="font-size:15px;margin:8px 0;word-break:break-all">' + h(data.totpSecret) + '</div>' +
-      '<div class="tiny">otpauth URI</div>' +
-      '<div class="mono" style="margin-top:5px;word-break:break-all">' + h(data.otpauthUri) + '</div>' +
-    '</div></div>' +
-    '<div class="notice warn">Scan the QR code with Google Authenticator, or copy the manual secret, before continuing. It will not be shown again.</div>';
 }
 async function boot(){
   initTheme();
@@ -396,12 +383,11 @@ async function boot(){
 }
 function showLogin(message){
   state.admin = null; state.csrf = null;
-  authShell('Administrator sign-in', 'Password and authenticator code are both required.', 
+  authShell('Administrator sign-in', 'Use your admin email address and password.',
     (message ? '<div class="error-box">' + h(message) + '</div>' : '') +
     '<form id="login-form">' +
-      '<label class="field"><span>Username</span><input class="input" id="login-username" autocomplete="username" required maxlength="32"></label>' +
+      '<label class="field"><span>Email address</span><input class="input" id="login-email" type="email" autocomplete="username" required maxlength="254" placeholder="you@example.com"></label>' +
       '<label class="field"><span>Password</span><input class="input" id="login-password" type="password" autocomplete="current-password" required maxlength="128"></label>' +
-      '<label class="field"><span>Six-digit authenticator code</span><input class="input" id="login-code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required placeholder="000000"></label>' +
       '<div class="error-box" id="login-error" style="display:none"></div>' +
       '<button class="btn primary" id="login-submit" type="submit">Sign in securely</button>' +
     '</form>' +
@@ -422,9 +408,8 @@ function showLogin(message){
       const data = await api('/v1/admin/auth/login', {
         method:'POST', allow401:true,
         body: {
-          username: $('#login-username').value.trim(),
-          password: $('#login-password').value,
-          code: $('#login-code').value.trim()
+          email: $('#login-email').value.trim(),
+          password: $('#login-password').value
         }
       });
       state.admin = data.admin; state.csrf = data.csrfToken;
@@ -440,15 +425,14 @@ function showSetup(bootstrap){
   if (!bootstrap.setupEnabled) {
     authShell('Setup is locked', 'The relay is refusing first-run setup until a bootstrap secret is configured.',
       '<div class="notice warn"><b>ADMIN_SETUP_TOKEN is not configured.</b><br>Add a long random value as an <span class="mono">ADMIN_SETUP_TOKEN</span> environment variable in the Vercel project, redeploy, then reload this page.</div>' +
-      '<p class="tiny">If an administrator already exists, setup stays closed permanently. Use the existing account or reset 2FA through another super admin.</p>'
+      '<p class="tiny">If an administrator already exists, setup stays closed permanently. Use the existing account or the signup page with the setup token.</p>'
     );
     return;
   }
-  authShell('Create the first super admin', 'This page works once. The authenticator secret is shown only after creation.', 
+  authShell('Create the first super admin', 'This page works once. Choose an email address and password.',
     '<form id="setup-form">' +
       '<label class="field"><span>One-time setup token</span><input class="input" id="setup-token" type="password" autocomplete="off" required></label>' +
-      '<label class="field"><span>Username</span><input class="input" id="setup-username" autocomplete="username" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_.-]{3,32}"></label>' +
-      '<label class="field"><span>Display name</span><input class="input" id="setup-display" required maxlength="60"></label>' +
+      '<label class="field"><span>Email address</span><input class="input" id="setup-email" type="email" autocomplete="username" required maxlength="254" placeholder="you@example.com"></label>' +
       '<label class="field"><span>Password (12+ characters)</span><input class="input" id="setup-password" type="password" autocomplete="new-password" required minlength="12" maxlength="128"></label>' +
       '<div class="error-box" id="setup-error" style="display:none"></div>' +
       '<button class="btn primary" id="setup-submit" type="submit">Create administrator</button>' +
@@ -463,14 +447,13 @@ function showSetup(bootstrap){
         method:'POST',
         headers:{ 'x-setup-token': $('#setup-token').value.trim() },
         body: {
-          username: $('#setup-username').value.trim(),
-          displayName: $('#setup-display').value.trim(),
+          email: $('#setup-email').value.trim(),
           password: $('#setup-password').value
         }
       });
-      authShell('Authenticator enrolled', 'Scan the QR code with Google Authenticator now.',
-        enrollmentHtml(data) +
-        '<button class="btn primary" id="setup-continue" style="margin-top:14px">I saved the secret — sign in</button>'
+      authShell('Administrator created', 'Sign in with the email address and password you just chose.',
+        '<div class="notice ok">Your account is ready. No authenticator app is needed.</div>' +
+        '<button class="btn primary" id="setup-continue" style="margin-top:14px">Go to sign in</button>'
       );
       $('#setup-continue').addEventListener('click', () => showLogin());
     } catch (error) {
@@ -487,11 +470,10 @@ function showSignup(bootstrap){
     );
     return;
   }
-  authShell('Create an administrator', 'Choose your own username and password. The setup token comes from your Vercel environment.',
+  authShell('Create an administrator', 'Choose an email address and password. The setup token comes from your Vercel environment.',
     '<form id="signup-form">' +
       '<label class="field"><span>One-time setup token</span><input class="input" id="signup-token" type="password" autocomplete="off" required></label>' +
-      '<label class="field"><span>Username</span><input class="input" id="signup-username" autocomplete="username" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_.-]{3,32}"></label>' +
-      '<label class="field"><span>Display name</span><input class="input" id="signup-display" required maxlength="60"></label>' +
+      '<label class="field"><span>Email address</span><input class="input" id="signup-email" type="email" autocomplete="username" required maxlength="254" placeholder="you@example.com"></label>' +
       '<label class="field"><span>Password (12+ characters)</span><input class="input" id="signup-password" type="password" autocomplete="new-password" required minlength="12" maxlength="128"></label>' +
       '<div class="error-box" id="signup-error" style="display:none"></div>' +
       '<button class="btn primary" id="signup-submit" type="submit">Create administrator</button>' +
@@ -507,14 +489,13 @@ function showSignup(bootstrap){
         method: 'POST',
         headers: { 'x-setup-token': $('#signup-token').value.trim() },
         body: {
-          username: $('#signup-username').value.trim(),
-          displayName: $('#signup-display').value.trim(),
+          email: $('#signup-email').value.trim(),
           password: $('#signup-password').value
         }
       });
-      authShell('Authenticator enrolled', 'Scan the QR code with Google Authenticator now.',
-        enrollmentHtml(data) +
-        '<button class="btn primary" id="signup-continue" style="margin-top:14px">I saved the secret — sign in</button>'
+      authShell('Administrator created', 'Sign in with the email address and password you just chose.',
+        '<div class="notice ok">Your account is ready. No authenticator app is needed.</div>' +
+        '<button class="btn primary" id="signup-continue" style="margin-top:14px">Go to sign in</button>'
       );
       $('#signup-continue').addEventListener('click', () => {
         history.replaceState(null, '', '/admin');
@@ -549,7 +530,7 @@ const TITLES = {
   config:['Remote configuration','Feature flags that synchronise with Android'],
   announcements:['Announcements','In-app notices controlled from here'],
   audit:['Audit log','Every sensitive administrative action'],
-  admins:['Administrators','Roles, access and 2FA'],
+  admins:['Administrators','Roles and access'],
   account:['My account','Password and active sessions']
 };
 async function renderRoute(){
@@ -975,37 +956,26 @@ async function adminsView(){
   const main = $('#main');
   main.innerHTML = '<div class="grid two"><section class="panel"><h2>Administrators</h2><p class="hint">Super admin privileges are required to manage access.</p>' +
     '<div class="table-wrap"><table><thead><tr><th>Account</th><th>Role</th><th>Status</th><th>Last login</th><th></th></tr></thead><tbody>' +
-    data.admins.map(admin => '<tr><td><div class="name">' + h(admin.displayName) + '</div><div class="tiny">@' + h(admin.username) + '</div></td>' +
+    data.admins.map(admin => '<tr><td><div class="name">' + h(admin.displayName) + '</div><div class="tiny">' + h(admin.email || admin.username) + '</div></td>' +
       '<td>' + h(admin.role) + '</td><td>' + statusPill(admin.active ? 'active' : 'suspended') + '</td><td>' + h(fmtAt(admin.lastLoginAt)) + '</td>' +
-      '<td class="row"><button class="btn small" data-reset="' + h(admin.id) + '">Reset 2FA</button><button class="btn small ' + (admin.active ? 'danger' : '') + '" data-toggle-admin="' + h(admin.id) + '" data-active="' + (admin.active ? '1' : '0') + '">' + (admin.active ? 'Disable' : 'Enable') + '</button>' +
+      '<td class="row"><button class="btn small ' + (admin.active ? 'danger' : '') + '" data-toggle-admin="' + h(admin.id) + '" data-active="' + (admin.active ? '1' : '0') + '">' + (admin.active ? 'Disable' : 'Enable') + '</button>' +
       (admin.id !== state.admin.id ? '<button class="btn small danger" data-delete-admin="' + h(admin.id) + '" data-admin-name="' + h(admin.username) + '">Delete</button>' : '') +
       '</td></tr>').join('') +
     '</tbody></table></div></section>' +
-    '<section class="panel"><h2>Add administrator</h2><p class="hint">The authenticator secret is returned once after creation.</p><form id="admin-form">' +
-      '<label class="field"><span>Username</span><input class="input" id="adm-username" required minlength="3" maxlength="32" pattern="[A-Za-z0-9_.-]{3,32}"></label>' +
-      '<label class="field"><span>Display name</span><input class="input" id="adm-display" required maxlength="60"></label>' +
+    '<section class="panel"><h2>Add administrator</h2><p class="hint">They sign in with this email address and password.</p><form id="admin-form">' +
+      '<label class="field"><span>Email address</span><input class="input" id="adm-email" type="email" required maxlength="254" placeholder="you@example.com"></label>' +
       '<label class="field"><span>Password (12+ characters)</span><input class="input" id="adm-password" type="password" required minlength="12" maxlength="128" autocomplete="new-password"></label>' +
       '<label class="field"><span>Role</span><select id="adm-role"><option value="admin">Admin — operations</option><option value="support">Support — user assistance</option><option value="analyst">Analyst — read-only</option><option value="super_admin">Super admin — full control</option></select></label>' +
       '<button class="btn primary" type="submit">Create administrator</button></form></section></div>';
   $('#admin-form').addEventListener('submit', async event => {
     event.preventDefault();
     try {
-      const created = await api('/v1/admin/admins', { method:'POST', body:{ username:$('#adm-username').value.trim(), displayName:$('#adm-display').value.trim(), password:$('#adm-password').value, role:$('#adm-role').value } });
-      openModal('<div class="modal-head"><div><h3>Authenticator secret for @' + h(created.username) + '</h3><p class="hint">Give this to the administrator through a secure channel. It is shown once.</p></div><button class="icon-btn close" data-close>×</button></div>' +
-        enrollmentHtml(created) +
+      const created = await api('/v1/admin/admins', { method:'POST', body:{ email:$('#adm-email').value.trim(), password:$('#adm-password').value, role:$('#adm-role').value } });
+      openModal('<div class="modal-head"><div><h3>Administrator created</h3><p class="hint">' + h(created.email) + ' can now sign in with the password you set.</p></div><button class="icon-btn close" data-close>×</button></div>' +
         '<button class="btn primary" data-close>Done</button>');
       bindModalClose(); toast('Administrator created', 'ok'); await adminsView();
     } catch (error) { toast(error.message, 'bad'); }
   });
-  $$('[data-reset]').forEach(button => button.addEventListener('click', async () => {
-    if (!window.confirm('Reset 2FA? All sessions for that administrator will be revoked.')) return;
-    try {
-      const result = await api('/v1/admin/admins/' + encodeURIComponent(button.dataset.reset) + '/reset-2fa', { method:'POST' });
-      openModal('<div class="modal-head"><div><h3>New authenticator secret</h3><p class="hint">Shown once. Existing sessions were revoked.</p></div><button class="icon-btn close" data-close>×</button></div>' +
-        enrollmentHtml(result) + '<button class="btn primary" data-close>Done</button>');
-      bindModalClose();
-    } catch (error) { toast(error.message, 'bad'); }
-  }));
   $$('[data-toggle-admin]').forEach(button => button.addEventListener('click', async () => {
     const active = button.dataset.active === '1';
     if (!window.confirm((active ? 'Disable' : 'Enable') + ' this administrator?')) return;
@@ -1015,7 +985,7 @@ async function adminsView(){
     } catch (error) { toast(error.message, 'bad'); }
   }));
   $$('[data-delete-admin]').forEach(button => button.addEventListener('click', async () => {
-    if (!window.confirm('Delete @' + button.dataset.adminName + ' permanently? Their sessions and 2FA secret are removed.')) return;
+    if (!window.confirm('Delete @' + button.dataset.adminName + ' permanently? Their sessions are removed.')) return;
     try {
       await api('/v1/admin/admins/' + encodeURIComponent(button.dataset.deleteAdmin), { method:'DELETE' });
       toast('Administrator deleted', 'ok'); await adminsView();
@@ -1025,10 +995,9 @@ async function adminsView(){
 async function accountView(){
   const sessions = await api('/v1/admin/sessions');
   const main = $('#main');
-  main.innerHTML = '<div class="grid two"><section class="panel"><h2>Change password</h2><p class="hint">Requires your current password and a fresh authenticator code. Other sessions are revoked.</p><form id="password-form">' +
+  main.innerHTML = '<div class="grid two"><section class="panel"><h2>Change password</h2><p class="hint">Requires your current password. Other sessions are revoked.</p><form id="password-form">' +
     '<label class="field"><span>Current password</span><input class="input" id="pwd-current" type="password" required autocomplete="current-password"></label>' +
     '<label class="field"><span>New password (12+ characters)</span><input class="input" id="pwd-new" type="password" required minlength="12" autocomplete="new-password"></label>' +
-    '<label class="field"><span>Authenticator code</span><input class="input" id="pwd-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required autocomplete="one-time-code"></label>' +
     '<button class="btn primary" type="submit">Update password</button></form></section>' +
     '<section class="panel"><h2>Active sessions</h2><p class="hint">Sessions are HttpOnly cookies bound to this browser.</p><div class="stack">' +
       sessions.sessions.map(session => '<div class="notice"><div class="row"><b>' + (session.current ? 'This session' : 'Session') + '</b><span class="grow"></span>' + (session.current ? '<span class="pill ok">current</span>' : '<button class="btn small danger" data-revoke="' + h(session.id) + '">Revoke</button>') + '</div><div class="tiny">Created ' + h(fmtAt(session.createdAt)) + ' · expires ' + h(fmtAt(session.expiresAt)) + '<br>' + h(session.userAgent || 'unknown browser') + ' · ' + h(session.ip || 'unknown IP') + '</div></div>').join('') +
@@ -1036,7 +1005,7 @@ async function accountView(){
   $('#password-form').addEventListener('submit', async event => {
     event.preventDefault();
     try {
-      await api('/v1/admin/auth/password', { method:'POST', allow401:true, body:{ currentPassword:$('#pwd-current').value, newPassword:$('#pwd-new').value, code:$('#pwd-code').value.trim() } });
+      await api('/v1/admin/auth/password', { method:'POST', allow401:true, body:{ currentPassword:$('#pwd-current').value, newPassword:$('#pwd-new').value } });
       toast('Password updated. Other sessions revoked.', 'ok'); await accountView();
     } catch (error) { toast(error.message, 'bad'); }
   });

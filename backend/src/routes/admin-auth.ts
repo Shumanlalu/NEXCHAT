@@ -6,24 +6,20 @@ import type { Database } from "../db";
 import { HttpError } from "../http";
 import { hashPassword, validatePassword, verifyPassword } from "../security/passwords";
 import { parseWith } from "../validation";
-import { totpQrDataUri } from "../admin/qr";
 import {
   ADMIN_SESSION_SECONDS,
   audit,
   csrfFor,
-  decryptTotpSecret,
   encryptTotpSecret,
   generateTotpSecret,
   hashSessionToken,
   newSessionToken,
-  otpauthUri,
   parseCookies,
   publicAdmin,
   requireAdmin,
   secureEqual,
   serializeAdminCookie,
   verifyCsrf,
-  verifyTotp,
   type AdminRow,
 } from "../admin/security";
 
@@ -32,29 +28,44 @@ interface Deps {
   config: AppConfig;
 }
 
-const username = z
+// New admin accounts are identified by email. The value is stored in the
+// existing `username` column so no schema migration is needed; lookups are
+// lowercase and case-insensitive. Legacy username-only rows keep signing in
+// so an existing deployment cannot be locked out by this change.
+const email = z
   .string()
   .trim()
   .transform((value) => value.toLowerCase())
-  .pipe(z.string().regex(/^[a-z0-9_.-]{3,32}$/, "Invalid administrator username"));
+  .pipe(z.string().max(254).email("Enter a valid email address"));
+
+const loginIdentifier = z
+  .string()
+  .trim()
+  .transform((value) => value.toLowerCase())
+  .refine(
+    (value) => z.string().email().safeParse(value).success || /^[a-z0-9_.-]{3,32}$/.test(value),
+    "Enter a valid email address",
+  );
 
 const loginBody = z.object({
-  username,
+  email: loginIdentifier,
   password: z.string().min(1).max(128),
-  code: z.string().trim().regex(/^\d{6}$/, "Enter the six-digit authenticator code"),
 });
 
 const setupBody = z.object({
-  username,
-  displayName: z.string().trim().min(1).max(60),
+  email,
+  displayName: z.string().trim().min(1).max(60).optional(),
   password: z.string().min(12).max(128),
 });
 
 const changePasswordBody = z.object({
   currentPassword: z.string().min(1).max(128),
   newPassword: z.string().min(12).max(128),
-  code: z.string().trim().regex(/^\d{6}$/),
 });
+
+function displayNameFor(address: string, supplied?: string): string {
+  return supplied?.trim() || address.split("@")[0] || address;
+}
 
 async function adminCount(db: Database): Promise<number> {
   const row = await db.one<{ count: string }>("SELECT count(*)::text AS count FROM admin_users");
@@ -119,34 +130,39 @@ export async function registerAdminAuthRoutes(
       const passwordError = validatePassword(body.password);
       if (passwordError) throw new HttpError(400, "WEAK_PASSWORD", passwordError);
       const { hash, salt } = await hashPassword(body.password);
-      const secret = generateTotpSecret();
+      // The column stays NOT NULL for schema compatibility, but sign-in no
+      // longer requires a second factor.
+      const unusedSecret = generateTotpSecret();
       const id = randomUUID();
       await db.query(
         `INSERT INTO admin_users
            (id, username, display_name, password_hash, password_salt, totp_secret_enc, role)
          VALUES ($1,$2,$3,$4,$5,$6,'super_admin')`,
-        [id, body.username, body.displayName, hash, salt, encryptTotpSecret(secret, config)],
+        [
+          id,
+          body.email,
+          displayNameFor(body.email, body.displayName),
+          hash,
+          salt,
+          encryptTotpSecret(unusedSecret, config),
+        ],
       );
       await audit(db, id, "admin.setup.completed", request, "admin", id, {
-        username: body.username,
+        email: body.email,
       });
-      const uri = otpauthUri(body.username, secret);
       return reply.code(201).send({
         id,
-        username: body.username,
-        totpSecret: secret,
-        otpauthUri: uri,
-        qrDataUrl: await totpQrDataUri(uri),
-        message:
-          "Add this secret to an authenticator now. It is shown only once, and sign-in requires it.",
+        email: body.email,
+        username: body.email,
+        message: "Administrator created. Sign in with this email and your password.",
       });
     },
   );
 
   // Break-glass enrollment. The normal setup route closes permanently once an
-  // admin exists, which leaves a sole admin locked out if their password or
-  // authenticator is lost. This route requires the same ADMIN_SETUP_TOKEN and
-  // only *adds* a super admin; it never resets or disables an existing one.
+  // admin exists, which leaves a sole admin locked out if their password is
+  // lost. This route requires the same ADMIN_SETUP_TOKEN and only *adds* a
+  // super admin; it never resets or disables an existing one.
   // It is rate limited and written to the audit log like every admin change.
   app.post(
     "/v1/admin/signup",
@@ -169,30 +185,34 @@ export async function registerAdminAuthRoutes(
       if (passwordError) throw new HttpError(400, "WEAK_PASSWORD", passwordError);
       const existing = await db.one<{ id: string }>(
         "SELECT id FROM admin_users WHERE username = $1",
-        [body.username],
+        [body.email],
       );
       if (existing) throw new HttpError(409, "ADMIN_EXISTS", "That administrator already exists");
 
       const { hash, salt } = await hashPassword(body.password);
-      const secret = generateTotpSecret();
+      const unusedSecret = generateTotpSecret();
       const id = randomUUID();
       await db.query(
         `INSERT INTO admin_users
            (id, username, display_name, password_hash, password_salt, totp_secret_enc, role)
          VALUES ($1,$2,$3,$4,$5,$6,'super_admin')`,
-        [id, body.username, body.displayName, hash, salt, encryptTotpSecret(secret, config)],
+        [
+          id,
+          body.email,
+          displayNameFor(body.email, body.displayName),
+          hash,
+          salt,
+          encryptTotpSecret(unusedSecret, config),
+        ],
       );
       await audit(db, id, "admin.signup.completed", request, "admin", id, {
-        username: body.username,
+        email: body.email,
       });
-      const uri = otpauthUri(body.username, secret);
       return reply.code(201).send({
         id,
-        username: body.username,
-        totpSecret: secret,
-        otpauthUri: uri,
-        qrDataUrl: await totpQrDataUri(uri),
-        message: "Scan the QR code now. It is shown only once.",
+        email: body.email,
+        username: body.email,
+        message: "Administrator created. Sign in with this email and your password.",
       });
     },
   );
@@ -204,12 +224,12 @@ export async function registerAdminAuthRoutes(
       const body = parseWith(loginBody, request.body);
       const admin = await db.one<AdminRow>(
         "SELECT * FROM admin_users WHERE username = $1",
-        [body.username],
+        [body.email],
       );
       // Always perform a password derivation to keep timing uniform.
       if (!admin) {
         await hashPassword(body.password);
-        throw new HttpError(401, "ADMIN_LOGIN_FAILED", "Incorrect credentials or code");
+        throw new HttpError(401, "ADMIN_LOGIN_FAILED", "Incorrect email or password");
       }
       if (admin.locked_until && new Date(admin.locked_until).getTime() > Date.now()) {
         await audit(db, admin.id, "admin.login.locked", request, "admin", admin.id);
@@ -220,21 +240,12 @@ export async function registerAdminAuthRoutes(
         admin.password_hash,
         admin.password_salt,
       );
-      let codeOk = false;
-      if (passwordOk) {
-        try {
-          codeOk = verifyTotp(decryptTotpSecret(admin.totp_secret_enc, config), body.code);
-        } catch {
-          codeOk = false;
-        }
-      }
-      if (!admin.active || !passwordOk || !codeOk) {
+      if (!admin.active || !passwordOk) {
         await recordLockout(db, admin);
         await audit(db, admin.id, "admin.login.failed", request, "admin", admin.id, {
           passwordOk,
-          codeOk,
         });
-        throw new HttpError(401, "ADMIN_LOGIN_FAILED", "Incorrect credentials or code");
+        throw new HttpError(401, "ADMIN_LOGIN_FAILED", "Incorrect email or password");
       }
 
       const token = newSessionToken();
@@ -300,16 +311,6 @@ export async function registerAdminAuthRoutes(
     if (!passwordOk) {
       throw new HttpError(401, "ADMIN_PASSWORD_INCORRECT", "Current password is incorrect");
     }
-    let codeOk = false;
-    try {
-      codeOk = verifyTotp(
-        decryptTotpSecret(context.admin.totp_secret_enc, config),
-        body.code,
-      );
-    } catch {
-      codeOk = false;
-    }
-    if (!codeOk) throw new HttpError(401, "ADMIN_CODE_INVALID", "Authenticator code is incorrect");
     const passwordError = validatePassword(body.newPassword);
     if (passwordError) throw new HttpError(400, "WEAK_PASSWORD", passwordError);
     const { hash, salt } = await hashPassword(body.newPassword);
